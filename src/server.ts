@@ -68,10 +68,10 @@ async function startServer(): Promise<void> {
       console.warn('⚠️  Running without database connection');
     }
     
-    app.listen(PORT, () => {
+    app.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Maintenance API server running on port ${PORT}`);
-      console.log(`📍 API available at http://localhost:${PORT}/api`);
-      console.log(`💚 Health check: http://localhost:${PORT}/health\n`);
+      console.log(`📍 API available at http://0.0.0.0:${PORT}/api`);
+      console.log(`💚 Health check: http://0.0.0.0:${PORT}/health\n`);
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

@@ -20,6 +20,7 @@ app.use(cors({
       'http://localhost:5173',
       'https://m_frontend.2edge.co',
       'https://m_backend.2edge.co',
+      'https://srung.2edge.co',
       /https:\/\/.*\.ngrok-free\.app$/,
       /https:\/\/.*\.ngrok\.io$/
     ];
