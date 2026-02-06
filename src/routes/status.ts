@@ -59,7 +59,7 @@ router.get('/dashboard', async (req: Request, res: Response) => {
     const recentRecords = await pool.query(`
       SELECT mr.*, e.equipment_name, e.equipment_code
       FROM maintenance_records mr
-      LEFT JOIN equipment e ON mr.equipment_id = e.equipment_id
+      LEFT JOIN equipment e ON mr.equipment_id = e.id
       ORDER BY mr.created_at DESC
       LIMIT 5
     `);

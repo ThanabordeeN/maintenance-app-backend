@@ -154,6 +154,110 @@ BEGIN
 END $$;
 `;
 
+// Migration: Add maintenance tracking columns and schedules table
+const maintenanceTrackingMigrationSQL = `
+-- Migration: Add maintenance unit tracking to equipment
+DO $$
+BEGIN
+  -- Add equipment_type column if it doesn't exist
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                 WHERE table_name='equipment' AND column_name='equipment_type') THEN
+    ALTER TABLE equipment ADD COLUMN equipment_type VARCHAR(100);
+  END IF;
+
+  -- Add columns to equipment table if they don't exist
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                 WHERE table_name='equipment' AND column_name='maintenance_unit') THEN
+    ALTER TABLE equipment ADD COLUMN maintenance_unit VARCHAR(50);
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                 WHERE table_name='equipment' AND column_name='initial_usage') THEN
+    ALTER TABLE equipment ADD COLUMN initial_usage DECIMAL(10,2) DEFAULT 0;
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                 WHERE table_name='equipment' AND column_name='current_usage') THEN
+    ALTER TABLE equipment ADD COLUMN current_usage DECIMAL(10,2) DEFAULT 0;
+  END IF;
+
+  -- Add is_active column with default TRUE (equipment is active by default)
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                 WHERE table_name='equipment' AND column_name='is_active') THEN
+    ALTER TABLE equipment ADD COLUMN is_active BOOLEAN DEFAULT TRUE;
+  END IF;
+END $$;
+
+-- Create equipment_maintenance_schedules table
+CREATE TABLE IF NOT EXISTS equipment_maintenance_schedules (
+  id SERIAL PRIMARY KEY,
+  equipment_id INTEGER REFERENCES equipment(id) ON DELETE CASCADE,
+  interval_value INTEGER NOT NULL,
+  start_from_usage DECIMAL(10,2) DEFAULT 0,
+  description TEXT,
+  last_completed_at_usage DECIMAL(12,2) DEFAULT 0,
+  current_ticket_id INTEGER REFERENCES maintenance_records(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Add new columns to existing table if needed
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                 WHERE table_name='equipment_maintenance_schedules' AND column_name='last_completed_at_usage') THEN
+    ALTER TABLE equipment_maintenance_schedules ADD COLUMN last_completed_at_usage DECIMAL(12,2) DEFAULT 0;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                 WHERE table_name='equipment_maintenance_schedules' AND column_name='current_ticket_id') THEN
+    ALTER TABLE equipment_maintenance_schedules ADD COLUMN current_ticket_id INTEGER REFERENCES maintenance_records(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
+-- Create index for better query performance
+CREATE INDEX IF NOT EXISTS idx_maintenance_schedules_equipment 
+ON equipment_maintenance_schedules(equipment_id);
+
+-- Add trigger for updated_at on maintenance_schedules
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_maintenance_schedules_updated_at') THEN
+    CREATE TRIGGER update_maintenance_schedules_updated_at 
+    BEFORE UPDATE ON equipment_maintenance_schedules
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+  END IF;
+END $$;
+
+-- Create equipment_usage_logs table for tracking daily usage
+CREATE TABLE IF NOT EXISTS equipment_usage_logs (
+  id SERIAL PRIMARY KEY,
+  equipment_id INTEGER REFERENCES equipment(id) ON DELETE CASCADE,
+  usage_value DECIMAL(12,2) NOT NULL,
+  log_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  notes TEXT,
+  recorded_by INTEGER REFERENCES maintenance_users(id),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for usage logs
+CREATE INDEX IF NOT EXISTS idx_usage_logs_equipment 
+ON equipment_usage_logs(equipment_id);
+
+CREATE INDEX IF NOT EXISTS idx_usage_logs_date 
+ON equipment_usage_logs(log_date DESC);
+
+-- Add trigger for updated_at on usage_logs
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_usage_logs_updated_at') THEN
+    CREATE TRIGGER update_usage_logs_updated_at 
+    BEFORE UPDATE ON equipment_usage_logs
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+  END IF;
+END $$;
+`;
+
 // SQL สำหรับสร้างข้อมูลตัวอย่าง
 const seedDataSQL = `
 -- ตรวจสอบว่ามีข้อมูลหรือยัง
@@ -189,17 +293,17 @@ export async function setupDatabase() {
     // Parse DATABASE_URL
     const dbUrl = new URL(process.env.DATABASE_URL);
     const dbName = dbUrl.pathname.slice(1); // ตัด / ออก
-    
+
     // เชื่อมต่อกับ postgres database (default database)
     const adminDbUrl = new URL(process.env.DATABASE_URL);
     adminDbUrl.pathname = '/postgres';
-    
+
     adminPool = new Pool({
       connectionString: adminDbUrl.toString(),
     });
 
     console.log('🔍 Checking if database exists...');
-    
+
     // ตรวจสอบว่า database มีอยู่หรือไม่
     const checkDbResult = await adminPool.query(
       'SELECT 1 FROM pg_database WHERE datname = $1',
@@ -223,10 +327,15 @@ export async function setupDatabase() {
     });
 
     console.log('🔨 Creating tables...');
-    
+
     // สร้าง tables
     await appPool.query(createTablesSQL);
     console.log('✅ Tables created successfully');
+
+    // Run migrations
+    console.log('🔄 Running migrations...');
+    await appPool.query(maintenanceTrackingMigrationSQL);
+    console.log('✅ Migrations completed successfully');
 
     // เพิ่มข้อมูลตัวอย่าง
     console.log('🌱 Seeding initial data...');
@@ -239,10 +348,10 @@ export async function setupDatabase() {
 
   } catch (error) {
     console.error('❌ Database setup error:', error.message);
-    
-    if (adminPool) await adminPool.end().catch(() => {});
-    if (appPool) await appPool.end().catch(() => {});
-    
+
+    if (adminPool) await adminPool.end().catch(() => { });
+    if (appPool) await appPool.end().catch(() => { });
+
     throw error;
   }
 }
