@@ -15,14 +15,17 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(cors({
   origin: function (origin, callback) {
-    // อนุญาตทุก origin ที่เป็น localhost:5173 หรือ ngrok
+    // อนุญาตทุก origin ที่เป็น localhost:5173 หรือ ngrok หรือ Cloudflare Tunnel
     const allowedOrigins = [
       'http://localhost:5173',
       'https://m_frontend.2edge.co',
       'https://m_backend.2edge.co',
       'https://srung.2edge.co',
+      'https://maint.mondaytech.online',
+      'https://maint-api.mondaytech.online',
       /https:\/\/.*\.ngrok-free\.app$/,
-      /https:\/\/.*\.ngrok\.io$/
+      /https:\/\/.*\.ngrok\.io$/,
+      /https:\/\/.*\.mondaytech\.online$/
     ];
     
     // อนุญาต requests ที่ไม่มี origin (เช่น Postman)

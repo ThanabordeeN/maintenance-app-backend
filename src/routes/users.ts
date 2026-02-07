@@ -1,5 +1,6 @@
 import express, { Request, Response, Router } from 'express';
 import pool from '../config/database.js';
+import { authenticateUser, requireAdminOrModerator, requireAdmin, AuthRequest } from '../middleware/auth.js';
 
 const router: Router = express.Router();
 
@@ -170,11 +171,16 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 });
 
-// Update user role
-router.patch('/:id/role', async (req: Request, res: Response) => {
+// Update user role (ADMIN ONLY)
+router.patch('/:id/role', authenticateUser, requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { role } = req.body;
+    
+    // Prevent changing own role
+    if (req.user && req.user.id === parseInt(id)) {
+      return res.status(403).json({ error: 'Cannot change your own role' });
+    }
     
     if (!['admin', 'supervisor', 'technician', 'moderator'].includes(role)) {
       return res.status(400).json({ error: 'Invalid role' });
@@ -196,10 +202,15 @@ router.patch('/:id/role', async (req: Request, res: Response) => {
   }
 });
 
-// Delete user
-router.delete('/:id', async (req: Request, res: Response) => {
+// Delete user (ADMIN ONLY)
+router.delete('/:id', authenticateUser, requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+    
+    // Prevent deleting yourself
+    if (req.user && req.user.id === parseInt(id)) {
+      return res.status(403).json({ error: 'Cannot delete yourself' });
+    }
     
     const result = await pool.query(
       'DELETE FROM maintenance_users WHERE id = $1 RETURNING *',

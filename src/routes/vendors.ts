@@ -1,5 +1,6 @@
 import express, { Request, Response, Router } from 'express';
 import pool from '../config/database.js';
+import { validateBody, vendorSchema } from '../middleware/validation.js';
 
 const router: Router = express.Router();
 
@@ -77,16 +78,12 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 // Create vendor
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', validateBody(vendorSchema), async (req: Request, res: Response) => {
   try {
     const {
       vendor_code, vendor_name, vendor_type, contact_person,
       phone, email, address, tax_id, payment_terms, notes
     } = req.body;
-
-    if (!vendor_name) {
-      return res.status(400).json({ error: 'vendor_name is required' });
-    }
 
     const result = await pool.query(`
       INSERT INTO vendors (
@@ -110,7 +107,7 @@ router.post('/', async (req: Request, res: Response) => {
 });
 
 // Update vendor
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', validateBody(vendorSchema.partial()), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const {

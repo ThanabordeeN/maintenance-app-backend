@@ -398,6 +398,10 @@ router.get('/records', async (req: Request, res: Response) => {
       title: r.title || '',
       description: r.description || '',
       notes: r.notes || '',
+      waiting_for_parts: r.waiting_for_parts || false,
+      parts_cost: r.parts_cost || 0,
+      labor_cost: r.labor_cost || 0,
+      total_cost: r.total_cost || 0,
     }));
 
     res.json(records);
@@ -484,10 +488,55 @@ router.get('/records/:id', async (req: Request, res: Response) => {
       ORDER BY uploaded_at ASC
     `, [id]);
 
+    // Get parts used
+    const partsUsedResult = await pool.query(`
+      SELECT mpu.*, 
+             sp.part_name, sp.part_code, sp.unit,
+             pri.custom_item_name, pri.custom_item_unit,
+             COALESCE((SELECT SUM(pr.quantity) FROM parts_returns pr WHERE pr.maintenance_part_used_id = mpu.id AND pr.status != 'rejected'), 0) as returned_quantity
+      FROM maintenance_parts_used mpu
+      LEFT JOIN spare_parts sp ON mpu.spare_part_id = sp.id
+      LEFT JOIN purchase_requisition_items pri ON mpu.pr_item_id = pri.id
+      WHERE mpu.maintenance_id = $1
+      ORDER BY mpu.created_at ASC
+    `, [id]);
+
+    // Get purchase requisitions linked to this maintenance
+    const requisitionsResult = await pool.query(`
+      SELECT pr.*, 
+             mu.display_name as requester_name,
+             (SELECT COUNT(*) FROM purchase_requisition_items WHERE pr_id = pr.id) as item_count
+      FROM purchase_requisitions pr
+      LEFT JOIN maintenance_users mu ON pr.requested_by = mu.id
+      WHERE pr.maintenance_record_id = $1
+      ORDER BY pr.created_at DESC
+    `, [id]);
+
+    // Calculate total parts cost from parts_used
+    const totalPartsCost = partsUsedResult.rows.reduce((sum: number, part: any) => {
+      return sum + (parseFloat(part.total_price) || 0);
+    }, 0);
+
+    // Update parts_cost in maintenance_records if different
+    const record = recordResult.rows[0];
+    if (parseFloat(record.parts_cost || 0) !== totalPartsCost) {
+      await pool.query(`
+        UPDATE maintenance_records 
+        SET parts_cost = $1, 
+            total_cost = COALESCE(labor_cost, 0) + $1,
+            updated_at = NOW() 
+        WHERE id = $2
+      `, [totalPartsCost, id]);
+      record.parts_cost = totalPartsCost;
+      record.total_cost = (parseFloat(record.labor_cost) || 0) + totalPartsCost;
+    }
+
     res.json({
-      record: recordResult.rows[0],
+      record: record,
       timeline: timelineResult.rows,
-      images: imagesResult.rows
+      images: imagesResult.rows,
+      parts_used: partsUsedResult.rows,
+      requisitions: requisitionsResult.rows
     });
   } catch (error) {
     console.error('Error fetching record:', error);
@@ -1130,13 +1179,13 @@ router.post('/equipment/:id/usage-logs', async (req: Request, res: Response) => 
           ticketId: ticketResult.rows[0].id
         });
         
-        // ส่ง notification ไปทุก user ที่เป็น technician/admin
-        const users = await client.query(
-          "SELECT id FROM maintenance_users WHERE role IN ('admin', 'moderator', 'technician')"
+        // ส่ง notification ไปเฉพาะ admin/moderator (ช่างจะเห็นเมื่อถูก assign)
+        const admins = await client.query(
+          "SELECT id FROM maintenance_users WHERE role IN ('admin', 'moderator')"
         );
-        for (const user of users.rows) {
+        for (const admin of admins.rows) {
           await createNotification({
-            user_id: user.id,
+            user_id: admin.id,
             title: `🔧 สร้าง PM Ticket: ${workOrder}`,
             message: `สร้างใบสั่งงาน PM อัตโนมัติสำหรับ ${equipment.equipment_name} - ${schedule.description || 'บำรุงรักษาตามกำหนด'}`,
             type: 'warning',
@@ -1165,14 +1214,14 @@ router.post('/equipment/:id/usage-logs', async (req: Request, res: Response) => 
           LIMIT 1
         `, [schedule.id]);
         
-        // ถ้ายังไม่เคยแจ้ง ให้แจ้งเตือน
+        // ถ้ายังไม่เคยแจ้ง ให้แจ้งเตือน (เฉพาะ admin/moderator)
         if (existingNotif.rows.length === 0) {
-          const users = await client.query(
-            "SELECT id FROM maintenance_users WHERE role IN ('admin', 'moderator', 'technician')"
+          const admins = await client.query(
+            "SELECT id FROM maintenance_users WHERE role IN ('admin', 'moderator')"
           );
-          for (const user of users.rows) {
+          for (const admin of admins.rows) {
             await createNotification({
-              user_id: user.id,
+              user_id: admin.id,
               title: `🟡 PM ใกล้ถึง: ${equipment.equipment_name}`,
               message: `${schedule.description || 'บำรุงรักษาตามกำหนด'} - เหลืออีก ${Math.round(remaining)} ${equipment.maintenance_unit}`,
               type: 'info',

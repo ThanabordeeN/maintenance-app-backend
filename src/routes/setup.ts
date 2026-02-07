@@ -3,10 +3,40 @@ import pool from '../config/database.js';
 
 const router: Router = express.Router();
 
-// Run all migrations to create missing tables
-router.post('/migrate', async (req: Request, res: Response) => {
-  const client = await pool.connect();
+// Admin-only middleware for setup routes
+const requireAdmin = async (req: Request, res: Response, next: Function) => {
+  const { userId } = req.body;
   
+  // In development, allow without auth if no users exist
+  const userCount = await pool.query('SELECT COUNT(*) FROM maintenance_users');
+  if (parseInt(userCount.rows[0].count) === 0) {
+    return next(); // Allow initial setup
+  }
+  
+  if (!userId) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  
+  try {
+    const userCheck = await pool.query(
+      'SELECT role FROM maintenance_users WHERE id = $1',
+      [userId]
+    );
+    
+    if (userCheck.rows.length === 0 || userCheck.rows[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    next();
+  } catch (error) {
+    return res.status(500).json({ error: 'Authorization check failed' });
+  }
+};
+
+// Run all migrations to create missing tables
+router.post('/migrate', requireAdmin, async (req: Request, res: Response) => {
+  const client = await pool.connect();
+
   try {
     await client.query('BEGIN');
 
@@ -39,7 +69,7 @@ router.post('/migrate', async (req: Request, res: Response) => {
     await client.query(`
       CREATE TABLE IF NOT EXISTS maintenance_parts_used (
         id SERIAL PRIMARY KEY,
-        maintenance_record_id INTEGER REFERENCES maintenance_records(id) ON DELETE CASCADE,
+        maintenance_id INTEGER REFERENCES maintenance_records(id) ON DELETE CASCADE,
         spare_part_id INTEGER REFERENCES spare_parts(id),
         quantity INTEGER NOT NULL DEFAULT 1,
         unit_price DECIMAL(12,2) DEFAULT 0,
@@ -241,13 +271,115 @@ router.post('/migrate', async (req: Request, res: Response) => {
       )
     `);
 
-    // 14. Add missing columns to maintenance_records if not exist
+    // ===========================================
+    // PHASE 5: Purchase & Requisition Tables
+    // ===========================================
+
+    // 14. Purchase Requisitions (ใบขอเบิก)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS purchase_requisitions (
+        id SERIAL PRIMARY KEY,
+        pr_number VARCHAR(50) UNIQUE NOT NULL,
+        maintenance_record_id INTEGER REFERENCES maintenance_records(id) ON DELETE SET NULL,
+        requested_by INTEGER REFERENCES maintenance_users(id),
+        status VARCHAR(50) DEFAULT 'pending', -- pending, approved, rejected, ordered, received, cancelled
+        priority VARCHAR(20) DEFAULT 'normal', -- urgent, high, normal, low
+        total_amount DECIMAL(12,2) DEFAULT 0,
+        notes TEXT,
+        rejection_reason TEXT,
+        approved_by INTEGER REFERENCES maintenance_users(id),
+        approved_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // 15. Purchase Orders (ใบสั่งซื้อ)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS purchase_orders (
+        id SERIAL PRIMARY KEY,
+        po_number VARCHAR(50) UNIQUE NOT NULL,
+        pr_id INTEGER REFERENCES purchase_requisitions(id) ON DELETE SET NULL,
+        vendor_id INTEGER REFERENCES vendors(id),
+        status VARCHAR(50) DEFAULT 'draft', -- draft, sent, partial, received, cancelled
+        total_amount DECIMAL(12,2) DEFAULT 0,
+        tax_rate DECIMAL(5,2) DEFAULT 7,
+        tax_amount DECIMAL(12,2) DEFAULT 0,
+        grand_total DECIMAL(12,2) DEFAULT 0,
+        payment_terms VARCHAR(255),
+        delivery_date DATE,
+        delivery_address TEXT,
+        notes TEXT,
+        created_by INTEGER REFERENCES maintenance_users(id),
+        approved_by INTEGER REFERENCES maintenance_users(id),
+        approved_at TIMESTAMP,
+        sent_at TIMESTAMP,
+        received_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // 16. Purchase Requisition Items (รายการในใบขอเบิก)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS purchase_requisition_items (
+        id SERIAL PRIMARY KEY,
+        pr_id INTEGER REFERENCES purchase_requisitions(id) ON DELETE CASCADE,
+        spare_part_id INTEGER REFERENCES spare_parts(id) ON DELETE SET NULL,
+        custom_item_name VARCHAR(255),
+        custom_item_unit VARCHAR(50) DEFAULT 'ชิ้น',
+        quantity INTEGER NOT NULL DEFAULT 1,
+        unit_price DECIMAL(12,2) DEFAULT 0,
+        total_price DECIMAL(12,2) DEFAULT 0,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // 17. Purchase Order Items (รายการในใบสั่งซื้อ)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS purchase_order_items (
+        id SERIAL PRIMARY KEY,
+        po_id INTEGER REFERENCES purchase_orders(id) ON DELETE CASCADE,
+        pr_item_id INTEGER REFERENCES purchase_requisition_items(id) ON DELETE SET NULL,
+        spare_part_id INTEGER REFERENCES spare_parts(id) ON DELETE SET NULL,
+        custom_item_name VARCHAR(255),
+        custom_item_unit VARCHAR(50) DEFAULT 'ชิ้น',
+        quantity INTEGER NOT NULL DEFAULT 1,
+        unit_price DECIMAL(12,2) DEFAULT 0,
+        total_price DECIMAL(12,2) DEFAULT 0,
+        received_quantity INTEGER DEFAULT 0,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // 18. Parts Returns (การคืนอะไหล่)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS parts_returns (
+        id SERIAL PRIMARY KEY,
+        return_number VARCHAR(50) UNIQUE NOT NULL,
+        maintenance_record_id INTEGER REFERENCES maintenance_records(id) ON DELETE SET NULL,
+        maintenance_part_used_id INTEGER REFERENCES maintenance_parts_used(id) ON DELETE SET NULL,
+        spare_part_id INTEGER REFERENCES spare_parts(id) ON DELETE SET NULL,
+        quantity INTEGER NOT NULL DEFAULT 1,
+        reason VARCHAR(50) NOT NULL, -- wrong_part, defective, not_needed, excess
+        notes TEXT,
+        returned_by INTEGER REFERENCES maintenance_users(id),
+        status VARCHAR(50) DEFAULT 'pending', -- pending, approved, rejected, restocked
+        approved_by INTEGER REFERENCES maintenance_users(id),
+        approved_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // 19. Add missing columns to maintenance_records if not exist
     const addColumnIfNotExists = async (table: string, column: string, definition: string) => {
       const check = await client.query(`
         SELECT column_name FROM information_schema.columns 
         WHERE table_name = $1 AND column_name = $2
       `, [table, column]);
-      
+
       if (check.rows.length === 0) {
         await client.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
       }
@@ -262,6 +394,7 @@ router.post('/migrate', async (req: Request, res: Response) => {
     await addColumnIfNotExists('maintenance_records', 'root_cause', 'TEXT');
     await addColumnIfNotExists('maintenance_records', 'action_taken', 'TEXT');
     await addColumnIfNotExists('maintenance_records', 'checklist_id', 'INTEGER REFERENCES checklist_responses(id)');
+    await addColumnIfNotExists('maintenance_records', 'waiting_for_parts', 'BOOLEAN DEFAULT false');
 
     await addColumnIfNotExists('equipment', 'purchase_date', 'DATE');
     await addColumnIfNotExists('equipment', 'installation_date', 'DATE');
@@ -272,10 +405,34 @@ router.post('/migrate', async (req: Request, res: Response) => {
 
     await addColumnIfNotExists('spare_parts', 'vendor_id', 'INTEGER REFERENCES vendors(id)');
 
+    // Add new columns to maintenance_parts_used
+    await addColumnIfNotExists('maintenance_parts_used', 'custom_item_name', 'VARCHAR(255)');
+    await addColumnIfNotExists('maintenance_parts_used', 'is_custom', 'BOOLEAN DEFAULT false');
+    await addColumnIfNotExists('maintenance_parts_used', 'pr_item_id', 'INTEGER REFERENCES purchase_requisition_items(id)');
+    await addColumnIfNotExists('maintenance_parts_used', 'status', "VARCHAR(50) DEFAULT 'pending'");
+
+    // Add columns to purchase_orders for mark-ordered feature
+    await addColumnIfNotExists('purchase_orders', 'ordered_by', 'INTEGER REFERENCES maintenance_users(id)');
+    await addColumnIfNotExists('purchase_orders', 'ordered_at', 'TIMESTAMP');
+
+    // Add actual_unit_price to purchase_order_items for receive feature
+    await addColumnIfNotExists('purchase_order_items', 'actual_unit_price', 'DECIMAL(12,2)');
+
+    // Create indexes for better performance
+    try {
+      await client.query('CREATE INDEX IF NOT EXISTS idx_parts_used_maintenance ON maintenance_parts_used(maintenance_id)');
+      await client.query('CREATE INDEX IF NOT EXISTS idx_pr_maintenance ON purchase_requisitions(maintenance_record_id)');
+      await client.query('CREATE INDEX IF NOT EXISTS idx_po_pr ON purchase_orders(pr_id)');
+      await client.query('CREATE INDEX IF NOT EXISTS idx_transactions_part ON spare_parts_transactions(spare_part_id)');
+      await client.query('CREATE INDEX IF NOT EXISTS idx_notifications_user ON maintenance_notifications(user_id, is_read)');
+    } catch (indexError) {
+      console.log('Some indexes may already exist');
+    }
+
     await client.query('COMMIT');
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: 'All migrations completed successfully',
       tables_created: [
         'spare_parts',

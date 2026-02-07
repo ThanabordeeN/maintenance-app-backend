@@ -1,5 +1,7 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import authRoutes from './routes/auth.js';
 import maintenanceRoutes from './routes/maintenance.js';
@@ -11,6 +13,9 @@ import reportsRoutes from './routes/reports.js';
 import notificationsRoutes, { checkAndNotifyOverdue, checkAndNotifyLowStock, createNotification } from './routes/notifications.js';
 import checklistsRoutes from './routes/checklists.js';
 import vendorsRoutes from './routes/vendors.js';
+import requisitionsRoutes from './routes/requisitions.js';
+import purchaseOrdersRoutes from './routes/purchaseOrders.js';
+import partsReturnsRoutes from './routes/partsReturns.js';
 import pool from './config/database.js';
 import { setupDatabase } from '../config/setup.js';
 import { notifyGroup, formatNewTicketMessage } from './services/lineNotify.js';
@@ -20,9 +25,40 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3002; // Different port from main backend
 
-// Middleware
+// Security Middleware
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allow images to load cross-origin
+  contentSecurityPolicy: false // Disable CSP for API server
+}));
+
+// Rate Limiting - prevent brute force attacks
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 500, // limit each IP to 500 requests per windowMs
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Stricter rate limit for auth endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20, // limit auth attempts
+  message: { error: 'Too many login attempts, please try again later.' },
+});
+
+app.use('/api/', limiter);
+app.use('/api/auth', authLimiter);
+
+// CORS Configuration
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : ['http://localhost:5173', 'http://localhost:3000', 'https://liff.line.me'];
+
 app.use(cors({
-  origin: true, // Allow all origins for development debugging
+  origin: process.env.NODE_ENV === 'production' 
+    ? allowedOrigins
+    : true, // Allow all origins in development
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -34,7 +70,12 @@ import fs from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-app.use(express.json());
+// Limit JSON body size to prevent DoS
+app.use(express.json({ limit: '1mb' }));
+
+// Sanitize inputs middleware
+import { sanitizeInputs } from './middleware/validation.js';
+app.use(sanitizeInputs);
 
 // Serve static files
 const uploadDir = path.join(__dirname, '../uploads');
@@ -54,10 +95,25 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 app.use('/api/checklists', checklistsRoutes);
 app.use('/api/vendors', vendorsRoutes);
+app.use('/api/requisitions', requisitionsRoutes);
+app.use('/api/purchase-orders', purchaseOrdersRoutes);
+app.use('/api/parts-returns', partsReturnsRoutes);
 
 // Health check
 app.get('/health', (req: Request, res: Response) => {
   res.json({ status: 'OK', message: 'Maintenance API server is running' });
+});
+
+// Global Error Handler - Hide sensitive error details in production
+app.use((err: any, req: Request, res: Response, next: NextFunction) => {
+  console.error('Unhandled error:', err);
+  
+  const isDev = process.env.NODE_ENV !== 'production';
+  
+  res.status(err.status || 500).json({
+    error: isDev ? err.message : 'An internal error occurred',
+    ...(isDev && { stack: err.stack })
+  });
 });
 
 // ========================================
@@ -68,10 +124,10 @@ app.get('/health', (req: Request, res: Response) => {
 async function checkPMSchedules() {
   try {
     console.log('🔍 Checking PM schedules...');
-    
+
     // Find schedules that are due (remaining <= 0) or approaching (remaining <= threshold)
     const threshold = 50; // Notify when 50 hours remaining
-    
+
     const dueSchedules = await pool.query(`
       SELECT 
         ems.id,
@@ -91,33 +147,33 @@ async function checkPMSchedules() {
         AND (ems.last_completed_at_usage + ems.interval_value - e.current_usage) <= $1
       ORDER BY remaining ASC
     `, [threshold]);
-    
+
     if (dueSchedules.rows.length === 0) {
       console.log('✅ No PM schedules due');
       return { count: 0, schedules: [], tickets: [] };
     }
-    
+
     console.log(`⚠️ Found ${dueSchedules.rows.length} PM schedules due/approaching`);
-    
+
     // Get all technicians/admins to notify
     const users = await pool.query(
       "SELECT id, display_name, line_notify_token FROM maintenance_users WHERE role IN ('admin', 'moderator', 'technician')"
     );
-    
+
     // Get first admin/moderator for auto-assignment
     const defaultAssignee = await pool.query(
       "SELECT id FROM maintenance_users WHERE role IN ('admin', 'moderator') ORDER BY id LIMIT 1"
     );
     const assigneeId = defaultAssignee.rows[0]?.id || 1;
-    
+
     const notifiedSchedules = [];
     const createdTickets = [];
-    
+
     for (const schedule of dueSchedules.rows) {
       const isOverdue = parseFloat(schedule.remaining) <= 0;
       const statusText = isOverdue ? 'ถึงกำหนดแล้ว' : `อีก ${Math.round(schedule.remaining)} ชม.`;
       const notificationType = isOverdue ? 'warning' : 'info';
-      
+
       // Check if notification already sent today for this schedule
       const existingNotif = await pool.query(`
         SELECT id FROM maintenance_notifications 
@@ -126,17 +182,17 @@ async function checkPMSchedules() {
           AND created_at > NOW() - INTERVAL '24 hours'
         LIMIT 1
       `, [schedule.id]);
-      
+
       // Skip if already notified today (unless it's overdue and we haven't created ticket yet)
       if (existingNotif.rows.length > 0 && !isOverdue) {
         console.log(`⏭️ Already notified for schedule ${schedule.id} today, skipping`);
         continue;
       }
-      
+
       // ===== AUTO CREATE TICKET เมื่อถึงกำหนด (remaining <= 0) =====
       let ticketId = null;
       let workOrder = null;
-      
+
       if (isOverdue) {
         try {
           // Generate work order number
@@ -147,7 +203,7 @@ async function checkPMSchedules() {
           `, [year]);
           const count = parseInt(countResult.rows[0].count) + 1;
           workOrder = `PM-${year}-${String(count).padStart(6, '0')}`;
-          
+
           // Create maintenance record
           const ticketResult = await pool.query(`
             INSERT INTO maintenance_records 
@@ -166,48 +222,48 @@ async function checkPMSchedules() {
             `PM: ${schedule.equipment_name} - ${schedule.description || 'บำรุงรักษาตามกำหนด'}`,
             `บำรุงรักษาตามกำหนดรอบ ${schedule.interval_value} ชม.\nอุปกรณ์: ${schedule.equipment_name}\nUsage ปัจจุบัน: ${schedule.current_usage} ชม.`
           ]);
-          
+
           ticketId = ticketResult.rows[0].id;
-          
+
           // Update schedule with current_ticket_id
           await pool.query(
             'UPDATE equipment_maintenance_schedules SET current_ticket_id = $1, updated_at = NOW() WHERE id = $2',
             [ticketId, schedule.id]
           );
-          
+
           // Add timeline entry
           await pool.query(
             `INSERT INTO maintenance_timeline (maintenance_id, status, changed_by, notes)
              VALUES ($1, $2, $3, $4)`,
             [ticketId, 'pending', assigneeId, 'สร้างอัตโนมัติจากระบบ PM']
           );
-          
+
           console.log(`✅ Created PM ticket: ${workOrder} for ${schedule.equipment_name}`);
-          
+
           createdTickets.push({
             id: ticketId,
             workOrder,
             equipment: schedule.equipment_name,
             scheduleId: schedule.id,
           });
-          
+
         } catch (ticketError) {
           console.error(`❌ Failed to create ticket for schedule ${schedule.id}:`, ticketError);
         }
       }
-      
+
       // Create in-app notification for each user
       for (const user of users.rows) {
-        const notifTitle = ticketId 
+        const notifTitle = ticketId
           ? `🔧 สร้าง PM Ticket: ${workOrder}`
-          : (isOverdue 
+          : (isOverdue
             ? `🔴 PM ถึงกำหนด: ${schedule.equipment_name}`
             : `🟡 PM ใกล้ถึง: ${schedule.equipment_name}`);
-        
+
         const notifMessage = ticketId
           ? `สร้างใบสั่งงาน PM อัตโนมัติสำหรับ ${schedule.equipment_name} - ${schedule.description || 'บำรุงรักษาตามกำหนด'}`
           : `${schedule.description || 'บำรุงรักษาตามกำหนด'} - ทุก ${schedule.interval_value} ชม. (${statusText})`;
-        
+
         await createNotification({
           user_id: user.id,
           title: notifTitle,
@@ -218,16 +274,16 @@ async function checkPMSchedules() {
           reference_id: ticketId || schedule.id,
         });
       }
-      
+
       // Send LINE Notify to group
       const lineMessage = ticketId
         ? `\n🔧 สร้าง PM Ticket อัตโนมัติ 🔧\n━━━━━━━━━━━━━━━\n📋 เลขที่: ${workOrder}\n🏭 เครื่อง: ${schedule.equipment_name}\n📝 รายการ: ${schedule.description || 'บำรุงรักษา'}\n⏰ รอบ: ทุก ${schedule.interval_value} ชม.\n📊 Usage: ${schedule.current_usage} ชม.\n━━━━━━━━━━━━━━━`
         : (isOverdue
           ? `\n🔴 PM ถึงกำหนดแล้ว! 🔴\n━━━━━━━━━━━━━━━\n🏭 เครื่อง: ${schedule.equipment_name}\n📋 รายการ: ${schedule.description || 'บำรุงรักษา'}\n⏰ รอบ: ทุก ${schedule.interval_value} ชม.\n📊 ใช้งานปัจจุบัน: ${schedule.current_usage} ชม.\n━━━━━━━━━━━━━━━`
           : `\n🟡 PM ใกล้ถึงกำหนด 🟡\n━━━━━━━━━━━━━━━\n🏭 เครื่อง: ${schedule.equipment_name}\n📋 รายการ: ${schedule.description || 'บำรุงรักษา'}\n⏰ เหลืออีก: ${Math.round(schedule.remaining)} ชม.\n📊 ใช้งานปัจจุบัน: ${schedule.current_usage} ชม.\n━━━━━━━━━━━━━━━`);
-      
+
       await notifyGroup(lineMessage);
-      
+
       notifiedSchedules.push({
         id: schedule.id,
         equipment: schedule.equipment_name,
@@ -237,11 +293,11 @@ async function checkPMSchedules() {
         workOrder,
       });
     }
-    
+
     console.log(`📧 Sent notifications for ${notifiedSchedules.length} PM schedules`);
     console.log(`🎫 Created ${createdTickets.length} PM tickets`);
     return { count: notifiedSchedules.length, schedules: notifiedSchedules, tickets: createdTickets };
-    
+
   } catch (error) {
     console.error('❌ Error checking PM schedules:', error);
     return { error: String(error) };
@@ -258,7 +314,7 @@ app.get('/api/check-pm', async (req: Request, res: Response) => {
 app.get('/api/pm-status', async (req: Request, res: Response) => {
   try {
     const threshold = 100; // Show schedules within 100 hours
-    
+
     const schedules = await pool.query(`
       SELECT 
         ems.id,
@@ -276,7 +332,7 @@ app.get('/api/pm-status', async (req: Request, res: Response) => {
       WHERE e.is_active = true
       ORDER BY remaining ASC
     `);
-    
+
     res.json({
       schedules: schedules.rows.map(s => ({
         id: s.id,
@@ -289,9 +345,9 @@ app.get('/api/pm-status', async (req: Request, res: Response) => {
         remaining: parseFloat(s.remaining),
         hasTicket: !!s.current_ticket_id,
         ticketId: s.current_ticket_id,
-        status: parseFloat(s.remaining) <= 0 ? 'overdue' 
-              : parseFloat(s.remaining) <= 50 ? 'warning' 
-              : parseFloat(s.remaining) <= threshold ? 'approaching' 
+        status: parseFloat(s.remaining) <= 0 ? 'overdue'
+          : parseFloat(s.remaining) <= 50 ? 'warning'
+            : parseFloat(s.remaining) <= threshold ? 'approaching'
               : 'ok'
       }))
     });
@@ -306,7 +362,7 @@ app.get('/api/check-alerts', async (req: Request, res: Response) => {
   const pmResult = await checkPMSchedules();
   const overdueResult = await checkAndNotifyOverdue();
   const lowStockResult = await checkAndNotifyLowStock();
-  
+
   res.json({
     pm: pmResult,
     overdue: overdueResult,
@@ -330,27 +386,27 @@ async function testDatabaseConnection(): Promise<boolean> {
 async function startServer(): Promise<void> {
   try {
     console.log('🚀 Starting Maintenance API server...\n');
-    
+
     // Run database migrations
     await setupDatabase();
-    
+
     const dbConnected = await testDatabaseConnection();
     if (!dbConnected) {
       console.warn('⚠️  Running without database connection');
     }
-    
+
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Maintenance API server running on port ${PORT}`);
       console.log(`📍 API available at http://0.0.0.0:${PORT}/api`);
       console.log(`💚 Health check: http://0.0.0.0:${PORT}/health\n`);
-      
+
       // Start scheduled PM check (every hour)
       console.log('⏰ Starting scheduled PM check (every hour)...');
       setInterval(async () => {
         console.log('\n⏰ Running scheduled PM check...');
         await checkPMSchedules();
       }, 60 * 60 * 1000); // Every hour
-      
+
       // Run initial check after 10 seconds
       setTimeout(async () => {
         console.log('\n🔍 Running initial PM check...');

@@ -1,5 +1,7 @@
 import express, { Request, Response, Router } from 'express';
 import pool from '../config/database.js';
+import { authenticateUser, requireAdminOrModerator, AuthRequest } from '../middleware/auth.js';
+import { validateBody, sparePartSchema } from '../middleware/validation.js';
 
 const router: Router = express.Router();
 
@@ -56,7 +58,7 @@ router.get('/', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error fetching spare parts:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Failed to fetch spare parts' });
   }
 });
 
@@ -104,22 +106,18 @@ router.get('/:id', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     console.error('Error fetching spare part:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Failed to fetch spare part' });
   }
 });
 
-// Create spare part
-router.post('/', async (req: Request, res: Response) => {
+// Create spare part (Admin/Moderator only)
+router.post('/', authenticateUser, requireAdminOrModerator, validateBody(sparePartSchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
       part_code, part_name, description, category, unit,
       unit_price, current_stock, min_stock_level, max_stock_level,
       location, supplier, vendor_id
     } = req.body;
-
-    if (!part_code || !part_name) {
-      return res.status(400).json({ error: 'part_code and part_name are required' });
-    }
 
     const result = await pool.query(`
       INSERT INTO spare_parts (
@@ -144,8 +142,8 @@ router.post('/', async (req: Request, res: Response) => {
   }
 });
 
-// Update spare part
-router.put('/:id', async (req: Request, res: Response) => {
+// Update spare part (Admin/Moderator only)
+router.put('/:id', authenticateUser, requireAdminOrModerator, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const {
@@ -188,8 +186,8 @@ router.put('/:id', async (req: Request, res: Response) => {
   }
 });
 
-// Adjust stock (in/out)
-router.post('/:id/adjust', async (req: Request, res: Response) => {
+// Adjust stock (Admin/Moderator only)
+router.post('/:id/adjust', authenticateUser, requireAdminOrModerator, async (req: AuthRequest, res: Response) => {
   const client = await pool.connect();
   
   try {
