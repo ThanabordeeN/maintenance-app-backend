@@ -1,0 +1,16 @@
+# Development Dockerfile for maintenance_app backend
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm install
+
+# Copy source
+COPY . .
+
+EXPOSE 3002
+
+# Start with tsx watch for hot reload
+CMD ["npm", "run", "dev"]
