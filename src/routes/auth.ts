@@ -71,8 +71,8 @@ router.post('/verify', async (req: Request, res: Response) => {
       if (isFirstUser) {
         // Auto-register first user as admin
         const result = await pool.query(
-          `INSERT INTO maintenance_users (line_user_id, display_name, picture_url, role, status) 
-           VALUES ($1, $2, $3, 'admin', 'active') 
+          `INSERT INTO maintenance_users (line_user_id, display_name, picture_url, role, status, created_at, updated_at) 
+           VALUES ($1, $2, $3, 'admin', 'active', NOW(), NOW()) 
            RETURNING *`,
           [lineUserId, lineProfile.displayName, lineProfile.pictureUrl]
         );
@@ -103,8 +103,8 @@ router.post('/verify', async (req: Request, res: Response) => {
 
       // Always create pending user (Whitelist only)
       await pool.query(
-        `INSERT INTO maintenance_users (line_user_id, display_name, picture_url, role, status) 
-         VALUES ($1, $2, $3, 'technician', 'pending')`,
+        `INSERT INTO maintenance_users (line_user_id, display_name, picture_url, role, status, created_at, updated_at) 
+         VALUES ($1, $2, $3, 'technician', 'pending', NOW(), NOW())`,
         [lineUserId, lineProfile.displayName, lineProfile.pictureUrl]
       );
       return res.status(403).json({ 

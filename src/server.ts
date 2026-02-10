@@ -19,6 +19,9 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3002; // Different port from main backend
 
+// Trust proxy - needed when behind nginx reverse proxy (1 = behind 1 proxy)
+app.set('trust proxy', 1);
+
 // Security Middleware
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allow images to load cross-origin
@@ -32,6 +35,7 @@ const limiter = rateLimit({
   message: { error: 'Too many requests, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { trustProxy: false }, // Disable trust proxy validation
 });
 
 // Stricter rate limit for auth endpoints
@@ -39,6 +43,7 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 20, // limit auth attempts
   message: { error: 'Too many login attempts, please try again later.' },
+  validate: { trustProxy: false }, // Disable trust proxy validation
 });
 
 app.use('/api/', limiter);
