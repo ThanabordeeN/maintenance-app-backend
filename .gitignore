@@ -1,3 +1,4 @@
 node_modules
 uploads/images/
-*.diff
+*.diffdist/  
+.env 
