@@ -21,12 +21,26 @@ export const authenticateUser = async (
   next: NextFunction
 ) => {
   try {
+    const isDev = process.env.NODE_ENV !== 'production';
+
     console.log(`[Auth Debug] ${req.method} ${req.path}`);
     console.log('[Auth Debug] Body:', JSON.stringify(req.body));
     console.log('[Auth Debug] Query:', JSON.stringify(req.query));
     console.log('[Auth Debug] Headers x-user-id:', req.headers['x-user-id']);
 
     const userId = req.body.userId || req.query.userId || req.headers['x-user-id'];
+
+    // 🔓 Development mode bypass
+    if (!userId && isDev) {
+      console.log('[Auth Debug] 🔓 Dev mode: Bypassing authentication');
+      req.user = {
+        id: 1,
+        role: 'admin',
+        displayName: 'Dev User',
+        lineUserId: 'dev-user'
+      };
+      return next();
+    }
 
     if (!userId) {
       return res.status(401).json({ error: 'Authentication required' });

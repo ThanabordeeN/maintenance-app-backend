@@ -11,7 +11,6 @@ interface VerifyBody {
 interface RegisterBody {
   lineUserId: string;
   displayName?: string;
-  email?: string;
 }
 
 interface LineProfile {
@@ -42,8 +41,8 @@ router.post('/verify', async (req: Request, res: Response) => {
           lineUserId: 'dev-user-123',
           displayName: 'Dev User',
           pictureUrl: 'https://via.placeholder.com/150',
-          email: 'dev@example.com',
-          role: 'admin'
+          role: 'admin',
+          status: 'active'
         }
       });
     }
@@ -64,14 +63,73 @@ router.post('/verify', async (req: Request, res: Response) => {
       [lineUserId]
     );
 
+    // FIRST USER LOGIC: If no users exist, the first one becomes Admin
+    const usersCount = await pool.query('SELECT COUNT(*) FROM maintenance_users');
+    const isFirstUser = parseInt(usersCount.rows[0].count) === 0;
+
     if (userQuery.rows.length === 0) {
+      if (isFirstUser) {
+        // Auto-register first user as admin
+        const result = await pool.query(
+          `INSERT INTO maintenance_users (line_user_id, display_name, picture_url, role, status) 
+           VALUES ($1, $2, $3, 'admin', 'active') 
+           RETURNING *`,
+          [lineUserId, lineProfile.displayName, lineProfile.pictureUrl]
+        );
+        const user = result.rows[0];
+        return res.json({
+          success: true,
+          user: {
+            id: user.id,
+            lineUserId: user.line_user_id,
+            displayName: user.display_name,
+            pictureUrl: user.picture_url,
+            role: user.role,
+            status: user.status
+          }
+        });
+      }
+
+      // REGISTRATION GATING: Whitelist is now mandatory
+      const regQuery = await pool.query('SELECT value FROM system_settings WHERE key = \'ALLOW_REGISTRATION\'');
+      const allowRegistration = regQuery.rows.length > 0 ? regQuery.rows[0].value === 'true' : true;
+
+      if (!allowRegistration) {
+        return res.status(403).json({ 
+          error: 'Unauthorized', 
+          message: 'New registrations are currently closed.' 
+        });
+      }
+
+      // Always create pending user (Whitelist only)
+      await pool.query(
+        `INSERT INTO maintenance_users (line_user_id, display_name, picture_url, role, status) 
+         VALUES ($1, $2, $3, 'technician', 'pending')`,
+        [lineUserId, lineProfile.displayName, lineProfile.pictureUrl]
+      );
       return res.status(403).json({ 
-        error: 'Unauthorized', 
-        message: 'User not found in system' 
+        error: 'Pending', 
+        message: 'Your registration is pending approval.',
+        status: 'pending'
       });
     }
 
     const user = userQuery.rows[0];
+
+    // Status check
+    if (user.status === 'pending') {
+      return res.status(403).json({ 
+        error: 'Pending', 
+        message: 'Your registration is pending approval.',
+        status: 'pending'
+      });
+    }
+    if (user.status === 'rejected') {
+      return res.status(403).json({ 
+        error: 'Rejected', 
+        message: 'Your access has been denied by an administrator.' 
+      });
+    }
 
     // Update profile info
     await pool.query(
@@ -88,8 +146,8 @@ router.post('/verify', async (req: Request, res: Response) => {
         lineUserId: user.line_user_id,
         displayName: lineProfile.displayName,
         pictureUrl: lineProfile.pictureUrl,
-        email: user.email,
-        role: user.role
+        role: user.role,
+        status: user.status
       }
     });
 
@@ -113,7 +171,7 @@ router.post('/verify', async (req: Request, res: Response) => {
 // Register new user
 router.post('/register-user', async (req: Request, res: Response) => {
   try {
-    const { lineUserId, displayName, email } = req.body as RegisterBody;
+    const { lineUserId, displayName } = req.body as RegisterBody;
 
     if (!lineUserId) {
       return res.status(400).json({ error: 'LINE User ID is required' });
@@ -134,10 +192,10 @@ router.post('/register-user', async (req: Request, res: Response) => {
 
     // Add new user
     const result = await pool.query(
-      `INSERT INTO maintenance_users (line_user_id, display_name, email) 
-       VALUES ($1, $2, $3) 
+      `INSERT INTO maintenance_users (line_user_id, display_name) 
+       VALUES ($1, $2) 
        RETURNING *`,
-      [lineUserId, displayName, email]
+      [lineUserId, displayName]
     );
 
     res.status(201).json({

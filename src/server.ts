@@ -7,12 +7,12 @@ import authRoutes from './routes/auth.js';
 import maintenanceRoutes from './routes/maintenance.js';
 import usersRoutes from './routes/users.js';
 import statusRoutes from './routes/status.js';
+import usageRoutes from './routes/usage.js';
+import setupRoutes from './routes/setup.js';
 // import reportsRoutes from './routes/reports.js'; // Commented out - file doesn't exist yet
 import notificationsRoutes, { checkAndNotifyOverdue, createNotification } from './routes/notifications.js';
 
 import pool from './config/database.js';
-
-import { notifyGroup, formatNewTicketMessage } from './services/lineNotify.js';
 
 dotenv.config();
 
@@ -81,8 +81,10 @@ app.use('/uploads', express.static(uploadDir));
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/maintenance', maintenanceRoutes);
+app.use('/api/maintenance', usageRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/status', statusRoutes);
+app.use('/api/setup', setupRoutes);
 
 // app.use('/api/reports', reportsRoutes); // Commented out - file doesn't exist yet
 app.use('/api/notifications', notificationsRoutes);
@@ -130,7 +132,7 @@ async function checkPMSchedules() {
         (ems.last_completed_at_usage + ems.interval_value) as next_due,
         (ems.last_completed_at_usage + ems.interval_value - e.current_usage) as remaining
       FROM equipment_maintenance_schedules ems
-      JOIN equipment e ON ems.equipment_id = e.id
+      JOIN equipment e ON ems.equipment_id = e.equipment_id
       WHERE e.is_active = true
         AND ems.current_ticket_id IS NULL
         AND (ems.last_completed_at_usage + ems.interval_value - e.current_usage) <= $1
@@ -263,15 +265,6 @@ async function checkPMSchedules() {
           reference_id: ticketId || schedule.id,
         });
       }
-
-      // Send LINE Notify to group
-      const lineMessage = ticketId
-        ? `\n🔧 สร้าง PM Ticket อัตโนมัติ 🔧\n━━━━━━━━━━━━━━━\n📋 เลขที่: ${workOrder}\n🏭 เครื่อง: ${schedule.equipment_name}\n📝 รายการ: ${schedule.description || 'บำรุงรักษา'}\n⏰ รอบ: ทุก ${schedule.interval_value} ชม.\n📊 Usage: ${schedule.current_usage} ชม.\n━━━━━━━━━━━━━━━`
-        : (isOverdue
-          ? `\n🔴 PM ถึงกำหนดแล้ว! 🔴\n━━━━━━━━━━━━━━━\n🏭 เครื่อง: ${schedule.equipment_name}\n📋 รายการ: ${schedule.description || 'บำรุงรักษา'}\n⏰ รอบ: ทุก ${schedule.interval_value} ชม.\n📊 ใช้งานปัจจุบัน: ${schedule.current_usage} ชม.\n━━━━━━━━━━━━━━━`
-          : `\n🟡 PM ใกล้ถึงกำหนด 🟡\n━━━━━━━━━━━━━━━\n🏭 เครื่อง: ${schedule.equipment_name}\n📋 รายการ: ${schedule.description || 'บำรุงรักษา'}\n⏰ เหลืออีก: ${Math.round(schedule.remaining)} ชม.\n📊 ใช้งานปัจจุบัน: ${schedule.current_usage} ชม.\n━━━━━━━━━━━━━━━`);
-
-      await notifyGroup(lineMessage);
 
       notifiedSchedules.push({
         id: schedule.id,

@@ -1,6 +1,5 @@
 import express, { Request, Response, Router } from 'express';
 import pool from '../config/database.js';
-import { notifyPMOverdue } from '../services/lineMessaging.js';
 
 const router: Router = express.Router();
 
@@ -460,29 +459,27 @@ router.put('/preferences/:userId', async (req: Request, res: Response) => {
   try {
     const { userId } = req.params;
     const {
-      enable_line_push, enable_email, enable_in_app,
+      enable_in_app,
       notify_new_ticket, notify_assigned, notify_status_change,
       notify_overdue, updated_at
     } = req.body;
 
     const result = await pool.query(`
       INSERT INTO notification_preferences (
-        user_id, enable_line_push, enable_email, enable_in_app,
+        user_id, enable_in_app,
         notify_new_ticket, notify_assigned, notify_status_change,
         notify_overdue
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ) VALUES ($1, $2, $3, $4, $5, $6)
       ON CONFLICT (user_id) DO UPDATE SET
-        enable_line_push = COALESCE($2, notification_preferences.enable_line_push),
-        enable_email = COALESCE($3, notification_preferences.enable_email),
-        enable_in_app = COALESCE($4, notification_preferences.enable_in_app),
-        notify_new_ticket = COALESCE($5, notification_preferences.notify_new_ticket),
-        notify_assigned = COALESCE($6, notification_preferences.notify_assigned),
-        notify_status_change = COALESCE($7, notification_preferences.notify_status_change),
-        notify_overdue = COALESCE($8, notification_preferences.notify_overdue),
+        enable_in_app = COALESCE($2, notification_preferences.enable_in_app),
+        notify_new_ticket = COALESCE($3, notification_preferences.notify_new_ticket),
+        notify_assigned = COALESCE($4, notification_preferences.notify_assigned),
+        notify_status_change = COALESCE($5, notification_preferences.notify_status_change),
+        notify_overdue = COALESCE($6, notification_preferences.notify_overdue),
         updated_at = NOW()
       RETURNING *
     `, [
-      userId, enable_line_push, enable_email, enable_in_app,
+      userId, enable_in_app,
       notify_new_ticket, notify_assigned, notify_status_change,
       notify_overdue
     ]);
@@ -590,18 +587,6 @@ export async function checkAndNotifyOverdue() {
           reference_type: 'equipment_maintenance_schedule',
           reference_id: schedule.id
         });
-
-        // Send LINE notification to admin
-        try {
-          await notifyPMOverdue({
-            userId: admin.id,
-            equipmentName: schedule.equipment_name,
-            taskName: schedule.task_name,
-            overdueHours: Math.abs(schedule.remaining)
-          });
-        } catch (lineErr) {
-          console.error('LINE PM notification error:', lineErr);
-        }
       }
     }
 

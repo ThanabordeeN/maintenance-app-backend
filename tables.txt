@@ -1,0 +1,45 @@
+                           List of tables
+ Schema |              Name               | Type  |      Owner      
+--------+---------------------------------+-------+-----------------
+ public | _prisma_migrations              | table | smartquary_user
+ public | alerts                          | table | smartquary_user
+ public | audit_logs                      | table | smartquary_user
+ public | ct_sensor_data                  | table | smartquary_user
+ public | customer_vehicles               | table | smartquary_user
+ public | customers                       | table | smartquary_user
+ public | dashboard_snapshots             | table | smartquary_user
+ public | equipment                       | table | smartquary_user
+ public | equipment_daily_summary         | table | smartquary_user
+ public | equipment_maintenance_schedules | table | smartquary_user
+ public | equipment_usage_logs            | table | smartquary_user
+ public | feeder_inverter_data            | table | smartquary_user
+ public | gps_tracker_data                | table | smartquary_user
+ public | ladar_sensor_data               | table | smartquary_user
+ public | legacy_import_logs              | table | smartquary_user
+ public | maintenance_comments            | table | smartquary_user
+ public | maintenance_images              | table | smartquary_user
+ public | maintenance_notifications       | table | smartquary_user
+ public | maintenance_records             | table | smartquary_user
+ public | maintenance_timeline            | table | smartquary_user
+ public | maintenance_users               | table | smartquary_user
+ public | material_input_tickets          | table | smartquary_user
+ public | motor_daily_stats               | table | smartquary_user
+ public | notification_preferences        | table | smartquary_user
+ public | product_categories              | table | smartquary_user
+ public | product_prices                  | table | smartquary_user
+ public | products                        | table | smartquary_user
+ public | sales_invoice_items             | table | smartquary_user
+ public | sales_invoices                  | table | smartquary_user
+ public | sensors                         | table | smartquary_user
+ public | sub_contractors                 | table | smartquary_user
+ public | system_settings                 | table | smartquary_user
+ public | temperature_sensor_data         | table | smartquary_user
+ public | users                           | table | smartquary_user
+ public | vehicle_daily_summary           | table | smartquary_user
+ public | vehicle_trips                   | table | smartquary_user
+ public | vehicle_types                   | table | smartquary_user
+ public | vehicles                        | table | smartquary_user
+ public | vibration_sensor_data           | table | smartquary_user
+ public | weighbridge_users               | table | smartquary_user
+(40 rows)
+
