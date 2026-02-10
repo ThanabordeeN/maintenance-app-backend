@@ -7,7 +7,7 @@ import authRoutes from './routes/auth.js';
 import maintenanceRoutes from './routes/maintenance.js';
 import usersRoutes from './routes/users.js';
 import statusRoutes from './routes/status.js';
-import reportsRoutes from './routes/reports.js';
+// import reportsRoutes from './routes/reports.js'; // Commented out - file doesn't exist yet
 import notificationsRoutes, { checkAndNotifyOverdue, createNotification } from './routes/notifications.js';
 
 import pool from './config/database.js';
@@ -84,7 +84,7 @@ app.use('/api/maintenance', maintenanceRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/status', statusRoutes);
 
-app.use('/api/reports', reportsRoutes);
+// app.use('/api/reports', reportsRoutes); // Commented out - file doesn't exist yet
 app.use('/api/notifications', notificationsRoutes);
 
 

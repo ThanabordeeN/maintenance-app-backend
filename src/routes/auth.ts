@@ -29,6 +29,25 @@ router.post('/verify', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Access token is required' });
     }
 
+    // 🔓 DEV MODE: Bypass LINE authentication
+    const isDev = process.env.NODE_ENV !== 'production';
+    if (isDev && accessToken === 'dev-token') {
+      console.log('🔓 DEV MODE: Bypassing LINE authentication');
+      
+      // Return mock user data for development
+      return res.json({
+        success: true,
+        user: {
+          id: 1,
+          lineUserId: 'dev-user-123',
+          displayName: 'Dev User',
+          pictureUrl: 'https://via.placeholder.com/150',
+          email: 'dev@example.com',
+          role: 'admin'
+        }
+      });
+    }
+
     // Verify token with LINE API
     const lineResponse = await axios.get<LineProfile>('https://api.line.me/v2/profile', {
       headers: {
