@@ -50,13 +50,31 @@ interface UpdateRecordBody {
   userId?: number;
 }
 
-// Get all equipment
+// Get all equipment (with maintenance_schedules joined)
 router.get('/equipment', async (req: Request, res: Response) => {
   try {
     const { includeInactive } = req.query;
-    const query = includeInactive === 'true' 
-      ? 'SELECT * FROM equipment ORDER BY equipment_name'
-      : 'SELECT * FROM equipment WHERE is_active = true ORDER BY equipment_name';
+    const condition = includeInactive === 'true' ? '' : 'WHERE e.is_active = true';
+    const query = `
+      SELECT e.*,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', ems.id,
+              'interval_value', ems.interval_value,
+              'start_from_usage', ems.start_from_usage,
+              'description', ems.description,
+              'current_ticket_id', ems.current_ticket_id
+            )
+          ) FILTER (WHERE ems.id IS NOT NULL),
+          '[]'
+        ) AS maintenance_schedules
+      FROM equipment e
+      LEFT JOIN equipment_maintenance_schedules ems ON ems.equipment_id = e.equipment_id
+      ${condition}
+      GROUP BY e.equipment_id
+      ORDER BY e.equipment_name
+    `;
     const result = await pool.query(query);
     res.json({ equipment: result.rows });
   } catch (error) {
@@ -65,19 +83,35 @@ router.get('/equipment', async (req: Request, res: Response) => {
   }
 });
 
-// Get equipment by ID
+// Get equipment by ID (with maintenance_schedules joined)
 router.get('/equipment/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const result = await pool.query(
-      'SELECT * FROM equipment WHERE equipment_id = $1',
+      `SELECT e.*,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', ems.id,
+              'interval_value', ems.interval_value,
+              'start_from_usage', ems.start_from_usage,
+              'description', ems.description,
+              'current_ticket_id', ems.current_ticket_id
+            )
+          ) FILTER (WHERE ems.id IS NOT NULL),
+          '[]'
+        ) AS maintenance_schedules
+      FROM equipment e
+      LEFT JOIN equipment_maintenance_schedules ems ON ems.equipment_id = e.equipment_id
+      WHERE e.equipment_id = $1
+      GROUP BY e.equipment_id`,
       [id]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Equipment not found' });
     }
-    
+
     res.json({ equipment: result.rows[0] });
   } catch (error) {
     console.error('Error fetching equipment:', error);
@@ -87,37 +121,69 @@ router.get('/equipment/:id', async (req: Request, res: Response) => {
 
 // Create new equipment
 router.post('/equipment', async (req: Request, res: Response) => {
+  const client = await pool.connect();
   try {
-    const { equipment_code, equipment_type, equipment_name, description, location } = req.body;
-    
+    const { equipment_code, equipment_type, equipment_name, description, location, maintenance_unit, initial_usage, current_usage, maintenance_schedules } = req.body;
+
     if (!equipment_code || !equipment_type) {
       return res.status(400).json({ error: 'equipment_code and equipment_type are required' });
     }
 
-    const result = await pool.query(
-      `INSERT INTO equipment (equipment_code, equipment_type, equipment_name, description, location, is_active, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, true, NOW(), NOW())
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      `INSERT INTO equipment (equipment_code, equipment_type, equipment_name, description, location, maintenance_unit, initial_usage, current_usage, is_active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NOW(), NOW())
        RETURNING *`,
-      [equipment_code, equipment_type, equipment_name, description, location]
+      [equipment_code, equipment_type, equipment_name, description, location, maintenance_unit || null, initial_usage || 0, current_usage || 0]
     );
-    
-    res.status(201).json({ equipment: result.rows[0] });
+
+    const newEquipment = result.rows[0];
+
+    // Insert maintenance schedules if provided
+    if (maintenance_schedules && Array.isArray(maintenance_schedules) && maintenance_schedules.length > 0) {
+      for (const schedule of maintenance_schedules) {
+        await client.query(
+          `INSERT INTO equipment_maintenance_schedules (equipment_id, interval_value, start_from_usage, description, last_completed_at_usage, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
+          [
+            newEquipment.equipment_id,
+            parseFloat(schedule.interval_value) || 0,
+            parseFloat(schedule.start_from_usage) || 0,
+            schedule.description || null,
+            parseFloat(schedule.start_from_usage) || 0
+          ]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Return with schedules
+    newEquipment.maintenance_schedules = maintenance_schedules || [];
+    res.status(201).json({ equipment: newEquipment });
   } catch (error: any) {
+    await client.query('ROLLBACK');
     console.error('Error creating equipment:', error);
     if (error.code === '23505') { // unique violation
       return res.status(400).json({ error: 'Equipment code already exists' });
     }
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
   }
 });
 
 // Update equipment
 router.put('/equipment/:id', async (req: Request, res: Response) => {
+  const client = await pool.connect();
   try {
     const { id } = req.params;
-    const { equipment_code, equipment_type, equipment_name, description, location, is_active } = req.body;
+    const { equipment_code, equipment_type, equipment_name, description, location, is_active, maintenance_unit, initial_usage, current_usage, maintenance_schedules } = req.body;
 
-    const result = await pool.query(
+    await client.query('BEGIN');
+
+    const result = await client.query(
       `UPDATE equipment 
        SET equipment_code = COALESCE($1, equipment_code),
            equipment_type = COALESCE($2, equipment_type),
@@ -125,23 +191,82 @@ router.put('/equipment/:id', async (req: Request, res: Response) => {
            description = COALESCE($4, description),
            location = COALESCE($5, location),
            is_active = COALESCE($6, is_active),
+           maintenance_unit = $7,
+           initial_usage = COALESCE($8, initial_usage),
+           current_usage = COALESCE($9, current_usage),
            updated_at = NOW()
-       WHERE equipment_id = $7
+       WHERE equipment_id = $10
        RETURNING *`,
-      [equipment_code, equipment_type, equipment_name, description, location, is_active, id]
+      [equipment_code, equipment_type, equipment_name, description, location, is_active, maintenance_unit || null, initial_usage, current_usage, id]
     );
 
     if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Equipment not found' });
     }
-    
-    res.json({ equipment: result.rows[0] });
+
+    // Sync maintenance schedules if provided
+    if (maintenance_schedules && Array.isArray(maintenance_schedules)) {
+      // Delete existing schedules that are NOT linked to an active ticket
+      await client.query(
+        `DELETE FROM equipment_maintenance_schedules 
+         WHERE equipment_id = $1 AND (current_ticket_id IS NULL)`,
+        [id]
+      );
+
+      // Re-insert schedules (skip ones that have an id and are linked to a ticket)
+      for (const schedule of maintenance_schedules) {
+        // If this schedule already has an id (existing record with ticket), skip it
+        if (schedule.id && schedule.current_ticket_id) continue;
+
+        await client.query(
+          `INSERT INTO equipment_maintenance_schedules (equipment_id, interval_value, start_from_usage, description, last_completed_at_usage, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, NOW(), NOW())`,
+          [
+            id,
+            parseFloat(schedule.interval_value) || 0,
+            parseFloat(schedule.start_from_usage) || 0,
+            schedule.description || null,
+            parseFloat(schedule.start_from_usage) || 0
+          ]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Fetch updated equipment with schedules
+    const updated = await pool.query(
+      `SELECT e.*,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', ems.id,
+              'interval_value', ems.interval_value,
+              'start_from_usage', ems.start_from_usage,
+              'description', ems.description,
+              'current_ticket_id', ems.current_ticket_id
+            )
+          ) FILTER (WHERE ems.id IS NOT NULL),
+          '[]'
+        ) AS maintenance_schedules
+      FROM equipment e
+      LEFT JOIN equipment_maintenance_schedules ems ON ems.equipment_id = e.equipment_id
+      WHERE e.equipment_id = $1
+      GROUP BY e.equipment_id`,
+      [id]
+    );
+
+    res.json({ equipment: updated.rows[0] });
   } catch (error: any) {
+    await client.query('ROLLBACK');
     console.error('Error updating equipment:', error);
     if (error.code === '23505') {
       return res.status(400).json({ error: 'Equipment code already exists' });
     }
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
   }
 });
 
@@ -168,10 +293,10 @@ router.delete('/equipment/:id', async (req: Request, res: Response) => {
         'SELECT COUNT(*) FROM maintenance_records WHERE equipment_id = $1',
         [id]
       );
-      
+
       if (parseInt(checkResult.rows[0].count) > 0) {
-        return res.status(400).json({ 
-          error: 'Cannot delete equipment with maintenance records. Use soft delete instead.' 
+        return res.status(400).json({
+          error: 'Cannot delete equipment with maintenance records. Use soft delete instead.'
         });
       }
 
@@ -187,7 +312,7 @@ router.delete('/equipment/:id', async (req: Request, res: Response) => {
         return res.status(404).json({ error: 'Equipment not found' });
       }
     }
-    
+
     res.json({ success: true, message: 'Equipment deleted successfully' });
   } catch (error) {
     console.error('Error deleting equipment:', error);
@@ -199,7 +324,7 @@ router.delete('/equipment/:id', async (req: Request, res: Response) => {
 router.get('/records', async (req: Request, res: Response) => {
   try {
     const { status, priority, category } = req.query;
-    
+
     let query = `
       SELECT mr.*, 
              u.display_name as created_by_name,
@@ -210,34 +335,34 @@ router.get('/records', async (req: Request, res: Response) => {
       LEFT JOIN maintenance_users a ON mr.assigned_to = a.id
       LEFT JOIN equipment e ON mr.equipment_id = e.equipment_id
     `;
-    
+
     const conditions: string[] = [];
     const params: (string | number)[] = [];
     let paramCount = 1;
-    
+
     if (status && typeof status === 'string') {
       conditions.push(`mr.status = $${paramCount++}`);
       params.push(status);
     }
-    
+
     if (priority && typeof priority === 'string') {
       conditions.push(`mr.priority = $${paramCount++}`);
       params.push(priority);
     }
-    
+
     if (category && typeof category === 'string') {
       conditions.push(`mr.category = $${paramCount++}`);
       params.push(category);
     }
-    
+
     if (conditions.length > 0) {
       query += ' WHERE ' + conditions.join(' AND ');
     }
-    
+
     query += ' ORDER BY mr.created_at DESC';
-    
+
     const result = await pool.query(query, params);
-    
+
     // Format response to match main dashboard expected format
     const records = result.rows.map((r: any) => ({
       id: String(r.id),
@@ -260,7 +385,7 @@ router.get('/records', async (req: Request, res: Response) => {
       description: r.description || '',
       notes: r.notes || '',
     }));
-    
+
     res.json(records);
   } catch (error) {
     console.error('Error fetching maintenance records:', error);
@@ -276,24 +401,24 @@ router.get('/summary', async (req: Request, res: Response) => {
       FROM maintenance_records 
       GROUP BY status
     `);
-    
+
     const criticalCount = await pool.query(`
       SELECT COUNT(*) as count 
       FROM maintenance_records 
       WHERE priority = 'critical' AND status != 'completed'
     `);
-    
+
     const avgTime = await pool.query(`
       SELECT AVG(downtime_minutes) as avg 
       FROM maintenance_records 
       WHERE downtime_minutes IS NOT NULL
     `);
-    
+
     const countMap: Record<string, number> = {};
     statusCount.rows.forEach((row: any) => {
       countMap[row.status] = parseInt(row.count);
     });
-    
+
     res.json({
       pending: countMap['pending'] || 0,
       inProgress: countMap['in_progress'] || 0,
@@ -311,7 +436,7 @@ router.get('/summary', async (req: Request, res: Response) => {
 router.get('/records/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    
+
     // Get record detail
     const recordResult = await pool.query(`
       SELECT mr.*, 
@@ -324,11 +449,11 @@ router.get('/records/:id', async (req: Request, res: Response) => {
       LEFT JOIN equipment e ON mr.equipment_id = e.equipment_id
       WHERE mr.id = $1
     `, [id]);
-    
+
     if (recordResult.rows.length === 0) {
       return res.status(404).json({ error: 'Record not found' });
     }
-    
+
     // Get timeline/comments
     const timelineResult = await pool.query(`
       SELECT mt.*, u.display_name as changed_by_name, u.picture_url as changed_by_picture
@@ -337,16 +462,16 @@ router.get('/records/:id', async (req: Request, res: Response) => {
       WHERE mt.maintenance_id = $1
       ORDER BY mt.created_at ASC
     `, [id]);
-    
+
     // Get images
     const imagesResult = await pool.query(`
       SELECT * FROM maintenance_images
       WHERE maintenance_id = $1
       ORDER BY uploaded_at ASC
     `, [id]);
-    
-    res.json({ 
-      record: recordResult.rows[0], 
+
+    res.json({
+      record: recordResult.rows[0],
       timeline: timelineResult.rows,
       images: imagesResult.rows
     });
@@ -359,27 +484,27 @@ router.get('/records/:id', async (req: Request, res: Response) => {
 // Create new maintenance record
 router.post('/records', upload.array('images', 5), async (req: Request, res: Response) => {
   const client = await pool.connect();
-  
+
   try {
     await client.query('BEGIN');
-    
-    const { 
-      equipmentId, 
-      userId, 
+
+    const {
+      equipmentId,
+      userId,
       assignedTo,
-      maintenanceType, 
+      maintenanceType,
       priority = 'low',
       status = 'pending',
       category = 'mechanical',
       title,
-      description, 
+      description,
       notes,
-      scheduledDate 
+      scheduledDate
     } = req.body as CreateRecordBody;
 
     if (!maintenanceType) {
-      return res.status(400).json({ 
-        error: 'Maintenance Type is required' 
+      return res.status(400).json({
+        error: 'Maintenance Type is required'
       });
     }
 
@@ -416,9 +541,9 @@ router.post('/records', upload.array('images', 5), async (req: Request, res: Res
        RETURNING *`,
       [workOrder, equipmentId || null, userId || null, assignedTo || userId || null, maintenanceType, priority, status, category, title || null, description || null, notes || null, scheduledDate || null]
     );
-    
+
     const record = recordResult.rows[0];
-    
+
     // Create timeline entry
     await client.query(
       `INSERT INTO maintenance_timeline (maintenance_id, status, changed_by, notes)
@@ -438,7 +563,7 @@ router.post('/records', upload.array('images', 5), async (req: Request, res: Res
         );
       }
     }
-    
+
     await client.query('COMMIT');
 
     res.status(201).json({
@@ -463,19 +588,19 @@ router.post('/records', upload.array('images', 5), async (req: Request, res: Res
 // Update maintenance record (Status change with multiple images)
 router.patch('/records/:id', upload.array('images', 5), async (req: Request, res: Response) => {
   const client = await pool.connect();
-  
+
   try {
     await client.query('BEGIN');
-    
+
     const { id } = req.params;
-    const { 
-      status, 
-      notes, 
-      userId, 
-      rootCause, 
-      actionTaken, 
-      cancelledReason, 
-      onHoldReason 
+    const {
+      status,
+      notes,
+      userId,
+      rootCause,
+      actionTaken,
+      cancelledReason,
+      onHoldReason
     } = req.body as UpdateRecordBody;
 
     const updates: string[] = [];
@@ -486,7 +611,7 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
       const dbStatus = reverseMapStatus(status);
       updates.push(`status = $${paramCount++}`);
       values.push(dbStatus);
-      
+
       // Fetch current record to calculate downtime
       const currentRecord = await client.query('SELECT started_at, downtime_minutes FROM maintenance_records WHERE id = $1', [id]);
       const { started_at, downtime_minutes } = currentRecord.rows[0];
@@ -503,13 +628,13 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
           values.push(newTotalDowntime);
           updates.push(`started_at = NULL`); // Reset started_at until resumed
         }
-        
+
         if (dbStatus === 'completed') {
           updates.push(`completed_at = CURRENT_TIMESTAMP`);
         }
       }
     }
-    
+
     if (notes !== undefined) {
       updates.push(`notes = $${paramCount++}`);
       values.push(notes);
@@ -551,14 +676,14 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Maintenance record not found' });
     }
-    
+
     // Add timeline entry
     if (status && userId) {
-      const timelineNotes = notes || 
-        (cancelledReason ? `ยกเลิก: ${cancelledReason}` : 
-        (onHoldReason ? `พักงาน: ${onHoldReason}` : 
-        `Status changed to ${status}`));
-      
+      const timelineNotes = notes ||
+        (cancelledReason ? `ยกเลิก: ${cancelledReason}` :
+          (onHoldReason ? `พักงาน: ${onHoldReason}` :
+            `Status changed to ${status}`));
+
       await client.query(
         `INSERT INTO maintenance_timeline (maintenance_id, status, changed_by, notes)
          VALUES ($1, $2, $3, $4)`,
@@ -578,7 +703,7 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
         }
       }
     }
-    
+
     await client.query('COMMIT');
 
     res.json({
@@ -633,7 +758,7 @@ router.post('/records/:id/images', upload.array('images', 5), async (req: Reques
   try {
     const { id } = req.params;
     const { type = 'before' } = req.body;
-    
+
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
       return res.status(400).json({ error: 'No image files uploaded' });
@@ -655,7 +780,7 @@ router.post('/records/:id/images', upload.array('images', 5), async (req: Reques
       success: true,
       images: savedImages
     });
-    
+
   } catch (error) {
     console.error('Error uploading image:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -666,14 +791,14 @@ router.post('/records/:id/images', upload.array('images', 5), async (req: Reques
 router.get('/records/:id/images', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    
+
     const result = await pool.query(
       'SELECT * FROM maintenance_images WHERE maintenance_id = $1 ORDER BY uploaded_at DESC',
       [id]
     );
 
     res.json({ images: result.rows });
-    
+
   } catch (error) {
     console.error('Error fetching images:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -687,7 +812,7 @@ router.post('/records/:id/update', upload.array('images', 5), async (req: Reques
     await client.query('BEGIN');
     const { id } = req.params;
     const { notes, userId } = req.body;
-    
+
     const files = req.files as Express.Multer.File[];
     if (!notes && (!files || files.length === 0)) {
       return res.status(400).json({ error: 'Notes or images are required' });

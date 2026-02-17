@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Backend API for maintenance tracking with LINE LIFF authentication",
-  "main": "dist/server.js",
+  "main": "src/server.ts",
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
