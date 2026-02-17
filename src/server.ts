@@ -153,12 +153,12 @@ async function checkPMSchedules() {
 
     // Get all technicians/admins to notify
     const users = await pool.query(
-      "SELECT id, display_name, line_notify_token FROM maintenance_users WHERE role IN ('admin', 'moderator', 'technician')"
+      "SELECT id, display_name, line_notify_token FROM maintenance_users WHERE role IN ('admin', 'supervisor', 'technician')"
     );
 
-    // Get first admin/moderator for auto-assignment
+    // Get first admin/supervisor for auto-assignment
     const defaultAssignee = await pool.query(
-      "SELECT id FROM maintenance_users WHERE role IN ('admin', 'moderator') ORDER BY id LIMIT 1"
+      "SELECT id FROM maintenance_users WHERE role IN ('admin', 'supervisor') ORDER BY id LIMIT 1"
     );
     const assigneeId = defaultAssignee.rows[0]?.id || 1;
 
@@ -358,8 +358,13 @@ app.get('/api/check-alerts', async (req: Request, res: Response) => {
 // Test database connection
 async function testDatabaseConnection(): Promise<boolean> {
   try {
-    await pool.query('SELECT 1');
-    console.log('✅ Database connection successful');
+    await pool.query('SELECT NOW()');
+    console.log('✅ Database connected');
+
+    // MIGRATION: Auto-update legacy 'moderator' role to 'admin'
+    await pool.query("UPDATE maintenance_users SET role = 'admin' WHERE role = 'moderator'");
+    console.log('✅ Migrated legacy moderator roles to admin');
+
     return true;
   } catch (error) {
     console.error('❌ Database connection failed:', error);

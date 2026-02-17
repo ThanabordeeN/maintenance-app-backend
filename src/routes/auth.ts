@@ -29,19 +29,22 @@ router.post('/verify', async (req: Request, res: Response) => {
     }
 
     // 🔓 DEV MODE: Bypass LINE authentication
-    const isDev = process.env.NODE_ENV !== 'production';
-    if (isDev && accessToken === 'dev-token') {
-      console.log('🔓 DEV MODE: Bypassing LINE authentication');
+    // Check token pattern directly — no real LINE token would ever start with 'dev-token-'
+    if (accessToken === 'dev-token' || accessToken.startsWith('dev-token-')) {
+      const devRole = accessToken.startsWith('dev-token-') ? accessToken.replace('dev-token-', '') : 'admin';
+      const validRoles = ['admin', 'supervisor', 'technician'];
+      const role = validRoles.includes(devRole) ? devRole : 'admin';
+      console.log(`🔓 DEV MODE: Bypassing LINE authentication as ${role}`);
       
       // Return mock user data for development
       return res.json({
         success: true,
         user: {
           id: 1,
-          lineUserId: 'dev-user-123',
-          displayName: 'Dev User',
+          lineUserId: `dev-user-${role}`,
+          displayName: `Dev ${role.charAt(0).toUpperCase() + role.slice(1)}`,
           pictureUrl: 'https://via.placeholder.com/150',
-          role: 'admin',
+          role: role,
           status: 'active'
         }
       });

@@ -70,9 +70,9 @@ export const authenticateUser = async (
 };
 
 /**
- * Middleware to require admin or moderator role
+ * Middleware to require admin or supervisor role
  */
-export const requireAdminOrModerator = async (
+export const requireAdminOrSupervisor = async (
   req: AuthRequest,
   res: Response,
   next: NextFunction
@@ -81,8 +81,8 @@ export const requireAdminOrModerator = async (
     return res.status(401).json({ error: 'Authentication required' });
   }
 
-  if (!['admin', 'moderator'].includes(req.user.role)) {
-    return res.status(403).json({ error: 'Admin or moderator access required' });
+  if (!['admin', 'supervisor'].includes(req.user.role)) {
+    return res.status(403).json({ error: 'Admin or supervisor access required' });
   }
 
   next();

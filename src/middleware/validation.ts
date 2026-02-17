@@ -9,7 +9,7 @@ import { Request, Response, NextFunction } from 'express';
 export const userCreateSchema = z.object({
   line_user_id: z.string().min(1).max(100),
   display_name: z.string().min(1).max(255),
-  role: z.enum(['admin', 'moderator', 'technician', 'viewer']).optional(),
+  role: z.enum(['admin', 'supervisor', 'technician']).optional(),
   employee_id: z.string().max(50).optional(),
   department: z.string().max(100).optional(),
   phone: z.string().max(20).optional(),
@@ -17,7 +17,7 @@ export const userCreateSchema = z.object({
 
 export const userUpdateSchema = z.object({
   display_name: z.string().min(1).max(255).optional(),
-  role: z.enum(['admin', 'moderator', 'technician', 'viewer']).optional(),
+  role: z.enum(['admin', 'supervisor', 'technician']).optional(),
   employee_id: z.string().max(50).optional(),
   department: z.string().max(100).optional(),
   phone: z.string().max(20).optional(),

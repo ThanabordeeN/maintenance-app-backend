@@ -570,9 +570,9 @@ export async function checkAndNotifyOverdue() {
         AND mr.scheduled_date < CURRENT_DATE
     `);
 
-    // Get admins/moderators to notify (ช่างจะเห็นเมื่อถูก assign งาน)
+    // Get admins/supervisors to notify (ช่างจะเห็นเมื่อถูก assign งาน)
     const admins = await pool.query(
-      "SELECT id FROM maintenance_users WHERE role IN ('admin', 'moderator')"
+      "SELECT id FROM maintenance_users WHERE role IN ('admin', 'supervisor')"
     );
 
     // Create notifications

@@ -3,8 +3,8 @@ import pool from '../config/database.js';
 
 const router = express.Router();
 
-// Middleware ตรวจสอบว่าเป็น moderator
-const checkModerator = async (req, res, next) => {
+// Middleware ตรวจสอบว่าเป็น admin
+const checkAdmin = async (req, res, next) => {
   try {
     const { userId } = req.body;
     
@@ -21,19 +21,19 @@ const checkModerator = async (req, res, next) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    if (result.rows[0].role !== 'moderator') {
-      return res.status(403).json({ error: 'Access denied. Moderator role required.' });
+    if (result.rows[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied. Admin role required.' });
     }
 
     next();
   } catch (error) {
-    console.error('Moderator check error:', error);
+    console.error('Admin check error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-// ดึงรายชื่อผู้ใช้ทั้งหมด (เฉพาะ moderator)
-router.post('/list', checkModerator, async (req, res) => {
+// ดึงรายชื่อผู้ใช้ทั้งหมด (เฉพาะ admin)
+router.post('/list', checkAdmin, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT id, line_user_id, display_name, picture_url, email, role, created_at, updated_at 
@@ -51,8 +51,8 @@ router.post('/list', checkModerator, async (req, res) => {
   }
 });
 
-// เพิ่มผู้ใช้ใหม่ (เฉพาะ moderator)
-router.post('/add', checkModerator, async (req, res) => {
+// เพิ่มผู้ใช้ใหม่ (เฉพาะ admin)
+router.post('/add', checkAdmin, async (req, res) => {
   try {
     const { lineUserId, displayName, email, role } = req.body;
 
@@ -93,8 +93,8 @@ router.post('/add', checkModerator, async (req, res) => {
   }
 });
 
-// อัพเดทข้อมูลผู้ใช้ (เฉพาะ moderator)
-router.post('/update', checkModerator, async (req, res) => {
+// อัพเดทข้อมูลผู้ใช้ (เฉพาะ admin)
+router.post('/update', checkAdmin, async (req, res) => {
   try {
     const { targetUserId, displayName, email, role } = req.body;
 
@@ -134,17 +134,17 @@ router.post('/update', checkModerator, async (req, res) => {
   }
 });
 
-// ลบผู้ใช้ (เฉพาะ moderator)
-router.post('/delete', checkModerator, async (req, res) => {
+// ลบผู้ใช้ (เฉพาะ admin)
+router.post('/delete', checkAdmin, async (req, res) => {
   try {
-    const { userId: moderatorId, targetUserId } = req.body;
+    const { userId: adminId, targetUserId } = req.body;
 
     if (!targetUserId) {
       return res.status(400).json({ error: 'Target User ID is required' });
     }
 
     // ป้องกันไม่ให้ลบตัวเอง
-    if (moderatorId === targetUserId) {
+    if (adminId === targetUserId) {
       return res.status(400).json({ 
         error: 'Cannot delete your own account' 
       });
@@ -160,10 +160,10 @@ router.post('/delete', checkModerator, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // ป้องกันไม่ให้ลบ moderator คนอื่น
-    if (existingUser.rows[0].role === 'moderator') {
+    // ป้องกันไม่ให้ลบ admin คนอื่น
+    if (existingUser.rows[0].role === 'admin') {
       return res.status(403).json({ 
-        error: 'Cannot delete another moderator account' 
+        error: 'Cannot delete another admin account' 
       });
     }
 
@@ -180,8 +180,8 @@ router.post('/delete', checkModerator, async (req, res) => {
   }
 });
 
-// ค้นหาผู้ใช้จาก LINE User ID (เฉพาะ moderator)
-router.post('/search', checkModerator, async (req, res) => {
+// ค้นหาผู้ใช้จาก LINE User ID (เฉพาะ admin)
+router.post('/search', checkAdmin, async (req, res) => {
   try {
     const { lineUserId } = req.body;
 
