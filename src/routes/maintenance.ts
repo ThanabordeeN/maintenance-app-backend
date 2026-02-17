@@ -58,7 +58,28 @@ router.get('/equipment', async (req: Request, res: Response) => {
       ? 'SELECT * FROM equipment ORDER BY equipment_name'
       : 'SELECT * FROM equipment WHERE is_active = true ORDER BY equipment_name';
     const result = await pool.query(query);
-    res.json({ equipment: result.rows });
+    const equipmentList = result.rows;
+
+    if (equipmentList.length > 0) {
+      const equipmentIds = equipmentList.map((e: any) => e.equipment_id);
+      const schedulesResult = await pool.query(
+        `SELECT * FROM equipment_maintenance_schedules WHERE equipment_id = ANY($1)`,
+        [equipmentIds]
+      );
+
+      // Attach schedules
+      const schedulesByEquipment = schedulesResult.rows.reduce((acc: any, sch: any) => {
+        if (!acc[sch.equipment_id]) acc[sch.equipment_id] = [];
+        acc[sch.equipment_id].push(sch);
+        return acc;
+      }, {});
+      
+      equipmentList.forEach((e: any) => {
+        e.maintenance_schedules = schedulesByEquipment[e.equipment_id] || [];
+      });
+    }
+
+    res.json({ equipment: equipmentList });
   } catch (error) {
     console.error('Error fetching equipment:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -78,7 +99,14 @@ router.get('/equipment/:id', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Equipment not found' });
     }
     
-    res.json({ equipment: result.rows[0] });
+    const equipment = result.rows[0];
+    const schedulesResult = await pool.query(
+      'SELECT * FROM equipment_maintenance_schedules WHERE equipment_id = $1',
+      [id]
+    );
+    equipment.maintenance_schedules = schedulesResult.rows;
+
+    res.json({ equipment });
   } catch (error) {
     console.error('Error fetching equipment:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -88,20 +116,48 @@ router.get('/equipment/:id', async (req: Request, res: Response) => {
 // Create new equipment
 router.post('/equipment', async (req: Request, res: Response) => {
   try {
-    const { equipment_code, equipment_type, equipment_name, description, location } = req.body;
+    const { equipment_code, equipment_type, equipment_name, description, location, maintenance_unit, initial_usage, current_usage, maintenance_interval } = req.body;
     
     if (!equipment_code || !equipment_type) {
       return res.status(400).json({ error: 'equipment_code and equipment_type are required' });
     }
 
-    const result = await pool.query(
-      `INSERT INTO equipment (equipment_code, equipment_type, equipment_name, description, location, is_active, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, true, NOW(), NOW())
-       RETURNING *`,
-      [equipment_code, equipment_type, equipment_name, description, location]
-    );
+    const client = await pool.connect();
     
-    res.status(201).json({ equipment: result.rows[0] });
+    try {
+      await client.query('BEGIN');
+
+      const result = await client.query(
+        `INSERT INTO equipment (
+          equipment_code, equipment_type, equipment_name, description, location, 
+          maintenance_unit, initial_usage, current_usage,
+          is_active, created_at, updated_at
+        )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NOW(), NOW())
+         RETURNING *`,
+        [equipment_code, equipment_type, equipment_name, description, location, maintenance_unit || null, initial_usage || 0, current_usage || 0]
+      );
+      
+      const newEquipment = result.rows[0];
+
+      // Create Maintenance Schedule if interval is provided
+      if (maintenance_interval && Number(maintenance_interval) > 0) {
+        await client.query(
+          `INSERT INTO equipment_maintenance_schedules (
+            equipment_id, interval_value, start_from_usage, last_completed_at_usage, created_at, updated_at
+          ) VALUES ($1, $2, $3, $3, NOW(), NOW())`,
+          [newEquipment.equipment_id, Number(maintenance_interval), current_usage || 0]
+        );
+      }
+
+      await client.query('COMMIT');
+      res.status(201).json({ equipment: newEquipment });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   } catch (error: any) {
     console.error('Error creating equipment:', error);
     if (error.code === '23505') { // unique violation
@@ -115,27 +171,82 @@ router.post('/equipment', async (req: Request, res: Response) => {
 router.put('/equipment/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { equipment_code, equipment_type, equipment_name, description, location, is_active } = req.body;
+    const { equipment_code, equipment_type, equipment_name, description, location, is_active, maintenance_unit, initial_usage, current_usage, maintenance_interval } = req.body;
 
-    const result = await pool.query(
-      `UPDATE equipment 
-       SET equipment_code = COALESCE($1, equipment_code),
-           equipment_type = COALESCE($2, equipment_type),
-           equipment_name = COALESCE($3, equipment_name),
-           description = COALESCE($4, description),
-           location = COALESCE($5, location),
-           is_active = COALESCE($6, is_active),
-           updated_at = NOW()
-       WHERE equipment_id = $7
-       RETURNING *`,
-      [equipment_code, equipment_type, equipment_name, description, location, is_active, id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Equipment not found' });
-    }
+    const client = await pool.connect();
     
-    res.json({ equipment: result.rows[0] });
+    try {
+      await client.query('BEGIN');
+
+      const result = await client.query(
+        `UPDATE equipment 
+         SET equipment_code = COALESCE($1, equipment_code),
+             equipment_type = COALESCE($2, equipment_type),
+             equipment_name = COALESCE($3, equipment_name),
+             description = COALESCE($4, description),
+             location = COALESCE($5, location),
+             is_active = COALESCE($6, is_active),
+             maintenance_unit = COALESCE($7, maintenance_unit),
+             initial_usage = COALESCE($8, initial_usage),
+             current_usage = COALESCE($9, current_usage),
+             updated_at = NOW()
+         WHERE equipment_id = $10
+         RETURNING *`,
+        [
+          equipment_code ?? null,
+          equipment_type ?? null,
+          equipment_name ?? null,
+          description ?? null,
+          location ?? null,
+          is_active ?? null,
+          maintenance_unit ?? null,
+          initial_usage ?? null,
+          current_usage ?? null,
+          id
+        ]
+      );
+
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Equipment not found' });
+      }
+
+      // Update or Create Maintenance Schedule if interval is provided
+      if (maintenance_interval && Number(maintenance_interval) > 0) {
+        // Check if schedule exists
+        const scheduleCheck = await client.query(
+          'SELECT id FROM equipment_maintenance_schedules WHERE equipment_id = $1',
+          [id]
+        );
+
+        if (scheduleCheck.rows.length > 0) {
+          // Update existing
+          await client.query(
+            `UPDATE equipment_maintenance_schedules 
+             SET interval_value = $1, 
+                 updated_at = NOW()
+             WHERE equipment_id = $2`,
+            [Number(maintenance_interval), id]
+          );
+        } else {
+          // Create new (set last_completed to current_usage)
+          await client.query(
+            `INSERT INTO equipment_maintenance_schedules (
+              equipment_id, interval_value, start_from_usage, last_completed_at_usage, created_at, updated_at
+            ) VALUES ($1, $2, $3, $3, NOW(), NOW())`,
+            [id, Number(maintenance_interval), current_usage || initial_usage || 0]
+          );
+        }
+      }
+
+      await client.query('COMMIT');
+      res.json({ equipment: result.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   } catch (error: any) {
     console.error('Error updating equipment:', error);
     if (error.code === '23505') {

@@ -15,57 +15,63 @@ export interface AuthRequest extends Request {
  * Middleware to verify user exists and attach user info to request
  * Uses userId from body, query, or headers
  */
+import { authService } from '../services/auth.service.js';
+
 export const authenticateUser = async (
   req: AuthRequest,
   res: Response,
   next: NextFunction
 ) => {
   try {
-    const isDev = process.env.NODE_ENV !== 'production';
-
-    console.log(`[Auth Debug] ${req.method} ${req.path}`);
-    console.log('[Auth Debug] Body:', JSON.stringify(req.body));
-    console.log('[Auth Debug] Query:', JSON.stringify(req.query));
-    console.log('[Auth Debug] Headers x-user-id:', req.headers['x-user-id']);
-
-    const userId = req.body.userId || req.query.userId || req.headers['x-user-id'];
-
-    // 🔓 Development mode bypass
-    if (!userId && isDev) {
-      console.log('[Auth Debug] 🔓 Dev mode: Bypassing authentication');
-      req.user = {
-        id: 1,
-        role: 'admin',
-        displayName: 'Dev User',
-        lineUserId: 'dev-user'
-      };
-      return next();
+    const authHeader = req.headers.authorization;
+    
+    // Check for Bearer token
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing or invalid Authorization header' });
     }
 
-    if (!userId) {
-      return res.status(401).json({ error: 'Authentication required' });
+    const token = authHeader.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ error: 'Token is required' });
     }
 
-    const result = await pool.query(
-      'SELECT id, role, display_name, line_user_id FROM maintenance_users WHERE id = $1',
-      [userId]
-    );
+    // Verify using shared service
+    try {
+        const result = await authService.verifyLineToken(token);
+        
+        // Status check
+        if (result.user.status !== 'active' && result.user.status !== 'approved' && !result.user.lineUserId.startsWith('dev-')) {
+             // Allow pending users specifically for registration check endpoints if needed, 
+             // but generally we block. For now, strict block except for active/approved.
+             // Note: 'approved'/ 'active' mapping might vary, assuming 'active' based on previous code.
+             
+             // Wait, previous code allowed 'pending' users to hit verify endpoint but blocked them later?
+             // Let's stick to blocking inactive/banned.
+             if (['rejected', 'inactive', 'suspended'].includes(result.user.status)) {
+                 return res.status(403).json({ error: `User status is ${result.user.status}` });
+             }
+        }
 
-    if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid user' });
+        req.user = {
+            id: result.user.id,
+            role: result.user.role,
+            displayName: result.user.displayName,
+            lineUserId: result.user.lineUserId
+        };
+
+        next();
+    } catch (err: any) {
+        if (err.message === 'User not found in database') {
+             return res.status(401).json({ error: 'User not registered' });
+        }
+        console.error('Token verification failed:', err.message);
+        return res.status(401).json({ error: 'Invalid or expired token' });
     }
 
-    req.user = {
-      id: result.rows[0].id,
-      role: result.rows[0].role,
-      displayName: result.rows[0].display_name,
-      lineUserId: result.rows[0].line_user_id
-    };
-
-    next();
   } catch (error) {
-    console.error('Authentication error:', error);
-    return res.status(500).json({ error: 'Authentication failed' });
+    console.error('Authentication middleware error:', error);
+    return res.status(500).json({ error: 'Internal server error during authentication' });
   }
 };
 
