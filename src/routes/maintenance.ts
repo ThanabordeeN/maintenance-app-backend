@@ -151,6 +151,17 @@ router.delete('/equipment/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const { permanent } = req.query;
 
+    // Block deletion of system-defined equipment
+    const sourceCheck = await pool.query(
+      'SELECT source FROM equipment WHERE equipment_id = $1',
+      [id]
+    );
+    if (sourceCheck.rows[0]?.source === 'system') {
+      return res.status(403).json({
+        error: 'ไม่สามารถลบเครื่องจักรของระบบได้ (System equipment cannot be deleted)'
+      });
+    }
+
     if (permanent === 'true') {
       // Hard delete - check for maintenance records first
       const checkResult = await pool.query(
