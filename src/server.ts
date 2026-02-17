@@ -297,6 +297,17 @@ app.get('/api/check-pm', async (req: Request, res: Response) => {
   res.json(result);
 });
 
+// DEBUG ENDPOINT
+app.get('/api/debug-schema', async (req: Request, res: Response) => {
+  try {
+    const result = await pool.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'equipment_maintenance_schedules'");
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: String(error) });
+  }
+});
+
+
 // API endpoint to get PM schedules status (without creating notifications)
 app.get('/api/pm-status', async (req: Request, res: Response) => {
   try {

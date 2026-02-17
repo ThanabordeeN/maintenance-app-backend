@@ -54,7 +54,7 @@ interface UpdateRecordBody {
 router.get('/equipment', async (req: Request, res: Response) => {
   try {
     const { includeInactive } = req.query;
-    const query = includeInactive === 'true' 
+    const query = includeInactive === 'true'
       ? 'SELECT * FROM equipment ORDER BY equipment_name'
       : 'SELECT * FROM equipment WHERE is_active = true ORDER BY equipment_name';
     const result = await pool.query(query);
@@ -73,7 +73,7 @@ router.get('/equipment', async (req: Request, res: Response) => {
         acc[sch.equipment_id].push(sch);
         return acc;
       }, {});
-      
+
       equipmentList.forEach((e: any) => {
         e.maintenance_schedules = schedulesByEquipment[e.equipment_id] || [];
       });
@@ -94,11 +94,11 @@ router.get('/equipment/:id', async (req: Request, res: Response) => {
       'SELECT * FROM equipment WHERE equipment_id = $1',
       [id]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Equipment not found' });
     }
-    
+
     const equipment = result.rows[0];
     const schedulesResult = await pool.query(
       'SELECT * FROM equipment_maintenance_schedules WHERE equipment_id = $1',
@@ -117,13 +117,13 @@ router.get('/equipment/:id', async (req: Request, res: Response) => {
 router.post('/equipment', async (req: Request, res: Response) => {
   try {
     const { equipment_code, equipment_type, equipment_name, description, location, maintenance_unit, initial_usage, current_usage, maintenance_interval } = req.body;
-    
+
     if (!equipment_code || !equipment_type) {
       return res.status(400).json({ error: 'equipment_code and equipment_type are required' });
     }
 
     const client = await pool.connect();
-    
+
     try {
       await client.query('BEGIN');
 
@@ -137,7 +137,7 @@ router.post('/equipment', async (req: Request, res: Response) => {
          RETURNING *`,
         [equipment_code, equipment_type, equipment_name, description, location, maintenance_unit || null, initial_usage || 0, current_usage || 0]
       );
-      
+
       const newEquipment = result.rows[0];
 
       // Create Maintenance Schedule if interval is provided
@@ -174,7 +174,7 @@ router.put('/equipment/:id', async (req: Request, res: Response) => {
     const { equipment_code, equipment_type, equipment_name, description, location, is_active, maintenance_unit, initial_usage, current_usage, maintenance_interval } = req.body;
 
     const client = await pool.connect();
-    
+
     try {
       await client.query('BEGIN');
 
@@ -211,8 +211,56 @@ router.put('/equipment/:id', async (req: Request, res: Response) => {
         return res.status(404).json({ error: 'Equipment not found' });
       }
 
-      // Update or Create Maintenance Schedule if interval is provided
-      if (maintenance_interval && Number(maintenance_interval) > 0) {
+      // Update Maintenance Schedules if provided in an array
+      const { maintenance_schedules } = req.body;
+      if (Array.isArray(maintenance_schedules)) {
+        // 1. Get existing schedules to identify what to delete/update
+        const existingSchedules = await client.query(
+          'SELECT id FROM equipment_maintenance_schedules WHERE equipment_id = $1',
+          [id]
+        );
+        const existingIds = existingSchedules.rows.map(s => s.id);
+        const providedIds = maintenance_schedules.map(s => s.id).filter(id => !!id);
+
+        // 2. Delete schedules that are not in the provided array
+        const toDelete = existingIds.filter(eid => !providedIds.includes(eid));
+        if (toDelete.length > 0) {
+          await client.query(
+            'DELETE FROM equipment_maintenance_schedules WHERE id = ANY($1)',
+            [toDelete]
+          );
+        }
+
+        // 3. Update or Insert schedules
+        for (const schedule of maintenance_schedules) {
+          if (schedule.id) {
+            // Update existing
+            await client.query(
+              `UPDATE equipment_maintenance_schedules 
+               SET interval_value = $1, 
+                   description = $2,
+                   updated_at = NOW()
+               WHERE id = $3 AND equipment_id = $4`,
+              [Number(schedule.interval_value), schedule.description || null, schedule.id, id]
+            );
+          } else {
+            // Insert new
+            await client.query(
+              `INSERT INTO equipment_maintenance_schedules (
+                equipment_id, interval_value, description, start_from_usage, last_completed_at_usage, created_at, updated_at
+              ) VALUES ($1, $2, $3, $4, $4, NOW(), NOW())`,
+              [
+                id,
+                Number(schedule.interval_value),
+                schedule.description || null,
+                schedule.start_from_usage || current_usage || initial_usage || 0
+              ]
+            );
+          }
+        }
+      }
+      // Fallback for legacy single interval if schedules array not provided
+      else if (maintenance_interval && Number(maintenance_interval) > 0) {
         // Check if schedule exists
         const scheduleCheck = await client.query(
           'SELECT id FROM equipment_maintenance_schedules WHERE equipment_id = $1',
@@ -279,14 +327,15 @@ router.delete('/equipment/:id', async (req: Request, res: Response) => {
         'SELECT COUNT(*) FROM maintenance_records WHERE equipment_id = $1',
         [id]
       );
-      
+
       if (parseInt(checkResult.rows[0].count) > 0) {
-        return res.status(400).json({ 
-          error: 'Cannot delete equipment with maintenance records. Use soft delete instead.' 
+        return res.status(400).json({
+          error: 'Cannot delete equipment with maintenance records. Use soft delete instead.'
         });
       }
 
       await pool.query('DELETE FROM equipment WHERE equipment_id = $1', [id]);
+      res.json({ success: true, message: 'Equipment deleted successfully' });
     } else {
       // Soft delete
       const result = await pool.query(
@@ -297,11 +346,46 @@ router.delete('/equipment/:id', async (req: Request, res: Response) => {
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Equipment not found' });
       }
+
+      res.json({ success: true, message: 'Equipment deleted successfully' });
     }
-    
-    res.json({ success: true, message: 'Equipment deleted successfully' });
   } catch (error) {
     console.error('Error deleting equipment:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Toggle equipment active status
+router.patch('/equipment/:id/toggle', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // First, get the current status
+    const currentResult = await pool.query(
+      'SELECT is_active, equipment_name FROM equipment WHERE equipment_id = $1',
+      [id]
+    );
+
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Equipment not found' });
+    }
+
+    const equipment = currentResult.rows[0];
+    const newStatus = !equipment.is_active;
+
+    // Toggle the status
+    const result = await pool.query(
+      'UPDATE equipment SET is_active = $1, updated_at = NOW() WHERE equipment_id = $2 RETURNING *',
+      [newStatus, id]
+    );
+
+    res.json({
+      success: true,
+      message: `Equipment ${equipment.equipment_name} is now ${newStatus ? 'active' : 'inactive'}`,
+      equipment: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error toggling equipment status:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -310,7 +394,7 @@ router.delete('/equipment/:id', async (req: Request, res: Response) => {
 router.get('/records', async (req: Request, res: Response) => {
   try {
     const { status, priority, category } = req.query;
-    
+
     let query = `
       SELECT mr.*, 
              u.display_name as created_by_name,
@@ -321,34 +405,34 @@ router.get('/records', async (req: Request, res: Response) => {
       LEFT JOIN maintenance_users a ON mr.assigned_to = a.id
       LEFT JOIN equipment e ON mr.equipment_id = e.equipment_id
     `;
-    
+
     const conditions: string[] = [];
     const params: (string | number)[] = [];
     let paramCount = 1;
-    
+
     if (status && typeof status === 'string') {
       conditions.push(`mr.status = $${paramCount++}`);
       params.push(status);
     }
-    
+
     if (priority && typeof priority === 'string') {
       conditions.push(`mr.priority = $${paramCount++}`);
       params.push(priority);
     }
-    
+
     if (category && typeof category === 'string') {
       conditions.push(`mr.category = $${paramCount++}`);
       params.push(category);
     }
-    
+
     if (conditions.length > 0) {
       query += ' WHERE ' + conditions.join(' AND ');
     }
-    
+
     query += ' ORDER BY mr.created_at DESC';
-    
+
     const result = await pool.query(query, params);
-    
+
     // Format response to match main dashboard expected format
     const records = result.rows.map((r: any) => ({
       id: String(r.id),
@@ -371,7 +455,7 @@ router.get('/records', async (req: Request, res: Response) => {
       description: r.description || '',
       notes: r.notes || '',
     }));
-    
+
     res.json(records);
   } catch (error) {
     console.error('Error fetching maintenance records:', error);
@@ -387,24 +471,24 @@ router.get('/summary', async (req: Request, res: Response) => {
       FROM maintenance_records 
       GROUP BY status
     `);
-    
+
     const criticalCount = await pool.query(`
       SELECT COUNT(*) as count 
       FROM maintenance_records 
       WHERE priority = 'critical' AND status != 'completed'
     `);
-    
+
     const avgTime = await pool.query(`
       SELECT AVG(downtime_minutes) as avg 
       FROM maintenance_records 
       WHERE downtime_minutes IS NOT NULL
     `);
-    
+
     const countMap: Record<string, number> = {};
     statusCount.rows.forEach((row: any) => {
       countMap[row.status] = parseInt(row.count);
     });
-    
+
     res.json({
       pending: countMap['pending'] || 0,
       inProgress: countMap['in_progress'] || 0,
@@ -422,7 +506,7 @@ router.get('/summary', async (req: Request, res: Response) => {
 router.get('/records/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    
+
     // Get record detail
     const recordResult = await pool.query(`
       SELECT mr.*, 
@@ -435,11 +519,11 @@ router.get('/records/:id', async (req: Request, res: Response) => {
       LEFT JOIN equipment e ON mr.equipment_id = e.equipment_id
       WHERE mr.id = $1
     `, [id]);
-    
+
     if (recordResult.rows.length === 0) {
       return res.status(404).json({ error: 'Record not found' });
     }
-    
+
     // Get timeline/comments
     const timelineResult = await pool.query(`
       SELECT mt.*, u.display_name as changed_by_name, u.picture_url as changed_by_picture
@@ -448,16 +532,16 @@ router.get('/records/:id', async (req: Request, res: Response) => {
       WHERE mt.maintenance_id = $1
       ORDER BY mt.created_at ASC
     `, [id]);
-    
+
     // Get images
     const imagesResult = await pool.query(`
       SELECT * FROM maintenance_images
       WHERE maintenance_id = $1
       ORDER BY uploaded_at ASC
     `, [id]);
-    
-    res.json({ 
-      record: recordResult.rows[0], 
+
+    res.json({
+      record: recordResult.rows[0],
       timeline: timelineResult.rows,
       images: imagesResult.rows
     });
@@ -470,27 +554,28 @@ router.get('/records/:id', async (req: Request, res: Response) => {
 // Create new maintenance record
 router.post('/records', upload.array('images', 5), async (req: Request, res: Response) => {
   const client = await pool.connect();
-  
+
   try {
     await client.query('BEGIN');
-    
-    const { 
-      equipmentId, 
-      userId, 
+
+    const {
+      equipmentId,
+      userId,
       assignedTo,
-      maintenanceType, 
+      maintenanceType,
       priority = 'low',
       status = 'pending',
       category = 'mechanical',
       title,
-      description, 
+      description,
       notes,
-      scheduledDate 
-    } = req.body as CreateRecordBody;
+      scheduledDate,
+      scheduleId // Add scheduleId
+    } = req.body as CreateRecordBody & { scheduleId?: number };
 
     if (!maintenanceType) {
-      return res.status(400).json({ 
-        error: 'Maintenance Type is required' 
+      return res.status(400).json({
+        error: 'Maintenance Type is required'
       });
     }
 
@@ -516,20 +601,21 @@ router.post('/records', upload.array('images', 5), async (req: Request, res: Res
       title,
       description,
       notes,
-      scheduledDate
+      scheduledDate,
+      scheduleId
     });
 
     // Create record
     const recordResult = await client.query(
       `INSERT INTO maintenance_records 
-       (work_order, equipment_id, created_by, assigned_to, maintenance_type, priority, status, category, title, description, notes, scheduled_date, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+       (work_order, equipment_id, created_by, assigned_to, maintenance_type, priority, status, category, title, description, notes, scheduled_date, schedule_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
        RETURNING *`,
-      [workOrder, equipmentId || null, userId || null, assignedTo || userId || null, maintenanceType, priority, status, category, title || null, description || null, notes || null, scheduledDate || null]
+      [workOrder, equipmentId || null, userId || null, assignedTo || userId || null, maintenanceType, priority, status, category, title || null, description || null, notes || null, scheduledDate || null, scheduleId || null]
     );
-    
+
     const record = recordResult.rows[0];
-    
+
     // Create timeline entry
     await client.query(
       `INSERT INTO maintenance_timeline (maintenance_id, status, changed_by, notes)
@@ -549,7 +635,15 @@ router.post('/records', upload.array('images', 5), async (req: Request, res: Res
         );
       }
     }
-    
+
+    // If created from a schedule, update the schedule's current_ticket_id
+    if (scheduleId) {
+      await client.query(
+        'UPDATE equipment_maintenance_schedules SET current_ticket_id = $1, updated_at = NOW() WHERE id = $2',
+        [record.id, scheduleId]
+      );
+    }
+
     await client.query('COMMIT');
 
     res.status(201).json({
@@ -574,19 +668,19 @@ router.post('/records', upload.array('images', 5), async (req: Request, res: Res
 // Update maintenance record (Status change with multiple images)
 router.patch('/records/:id', upload.array('images', 5), async (req: Request, res: Response) => {
   const client = await pool.connect();
-  
+
   try {
     await client.query('BEGIN');
-    
+
     const { id } = req.params;
-    const { 
-      status, 
-      notes, 
-      userId, 
-      rootCause, 
-      actionTaken, 
-      cancelledReason, 
-      onHoldReason 
+    const {
+      status,
+      notes,
+      userId,
+      rootCause,
+      actionTaken,
+      cancelledReason,
+      onHoldReason
     } = req.body as UpdateRecordBody;
 
     const updates: string[] = [];
@@ -597,10 +691,10 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
       const dbStatus = reverseMapStatus(status);
       updates.push(`status = $${paramCount++}`);
       values.push(dbStatus);
-      
-      // Fetch current record to calculate downtime
-      const currentRecord = await client.query('SELECT started_at, downtime_minutes FROM maintenance_records WHERE id = $1', [id]);
-      const { started_at, downtime_minutes } = currentRecord.rows[0];
+
+      // Fetch current record to calculate downtime and check for schedule linkage
+      const currentRecord = await client.query('SELECT started_at, downtime_minutes, schedule_id, equipment_id FROM maintenance_records WHERE id = $1', [id]);
+      const { started_at, downtime_minutes, schedule_id, equipment_id } = currentRecord.rows[0];
 
       if (dbStatus === 'in_progress') {
         // Start or Resume
@@ -614,13 +708,29 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
           values.push(newTotalDowntime);
           updates.push(`started_at = NULL`); // Reset started_at until resumed
         }
-        
+
         if (dbStatus === 'completed') {
           updates.push(`completed_at = CURRENT_TIMESTAMP`);
+
+          // Auto-reset PM schedule if linked
+          if (schedule_id && equipment_id) {
+            // Get current usage of the equipment
+            const equipmentRes = await client.query('SELECT current_usage FROM equipment WHERE equipment_id = $1', [equipment_id]);
+            const currentUsage = Number(equipmentRes.rows[0]?.current_usage || 0);
+
+            // Update the specific schedule's last_completed_at_usage
+            if (currentUsage > 0) {
+              await client.query(
+                'UPDATE equipment_maintenance_schedules SET last_completed_at_usage = $1, updated_at = NOW() WHERE id = $2',
+                [currentUsage, schedule_id]
+              );
+              console.log(`Auto-reset schedule ${schedule_id} for equipment ${equipment_id} at usage ${currentUsage}`);
+            }
+          }
         }
       }
     }
-    
+
     if (notes !== undefined) {
       updates.push(`notes = $${paramCount++}`);
       values.push(notes);
@@ -662,14 +772,14 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Maintenance record not found' });
     }
-    
+
     // Add timeline entry
     if (status && userId) {
-      const timelineNotes = notes || 
-        (cancelledReason ? `ยกเลิก: ${cancelledReason}` : 
-        (onHoldReason ? `พักงาน: ${onHoldReason}` : 
-        `Status changed to ${status}`));
-      
+      const timelineNotes = notes ||
+        (cancelledReason ? `ยกเลิก: ${cancelledReason}` :
+          (onHoldReason ? `พักงาน: ${onHoldReason}` :
+            `Status changed to ${status}`));
+
       await client.query(
         `INSERT INTO maintenance_timeline (maintenance_id, status, changed_by, notes)
          VALUES ($1, $2, $3, $4)`,
@@ -689,7 +799,7 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
         }
       }
     }
-    
+
     await client.query('COMMIT');
 
     res.json({
@@ -744,7 +854,7 @@ router.post('/records/:id/images', upload.array('images', 5), async (req: Reques
   try {
     const { id } = req.params;
     const { type = 'before' } = req.body;
-    
+
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
       return res.status(400).json({ error: 'No image files uploaded' });
@@ -766,7 +876,7 @@ router.post('/records/:id/images', upload.array('images', 5), async (req: Reques
       success: true,
       images: savedImages
     });
-    
+
   } catch (error) {
     console.error('Error uploading image:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -777,14 +887,14 @@ router.post('/records/:id/images', upload.array('images', 5), async (req: Reques
 router.get('/records/:id/images', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    
+
     const result = await pool.query(
       'SELECT * FROM maintenance_images WHERE maintenance_id = $1 ORDER BY uploaded_at DESC',
       [id]
     );
 
     res.json({ images: result.rows });
-    
+
   } catch (error) {
     console.error('Error fetching images:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -798,7 +908,7 @@ router.post('/records/:id/update', upload.array('images', 5), async (req: Reques
     await client.query('BEGIN');
     const { id } = req.params;
     const { notes, userId } = req.body;
-    
+
     const files = req.files as Express.Multer.File[];
     if (!notes && (!files || files.length === 0)) {
       return res.status(400).json({ error: 'Notes or images are required' });
