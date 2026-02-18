@@ -22,9 +22,24 @@ const storage = multer.diskStorage({
   }
 });
 
-// File filter (only images)
+// File filter (only images — includes HEIC/HEIF from iPhone cameras)
+const ALLOWED_MIME_TYPES = [
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+];
+
 const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  if (file.mimetype.startsWith('image/')) {
+  // Some phones send an empty or nonstandard mimetype for HEIC — check extension too
+  const ext = path.extname(file.originalname).toLowerCase();
+  const isAllowedMime = file.mimetype.startsWith('image/') || ALLOWED_MIME_TYPES.includes(file.mimetype);
+  const isAllowedExt = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif'].includes(ext);
+
+  if (isAllowedMime || isAllowedExt) {
     cb(null, true);
   } else {
     cb(new Error('Only images are allowed!'));
@@ -35,7 +50,7 @@ const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 5 * 1024 * 1024 // 5MB limit
+    fileSize: 20 * 1024 * 1024 // 20MB limit (phone cameras can produce large files)
   }
 });
 
