@@ -9,7 +9,7 @@ import usersRoutes from './routes/users.js';
 import statusRoutes from './routes/status.js';
 import usageRoutes from './routes/usage.js';
 import setupRoutes from './routes/setup.js';
-// import reportsRoutes from './routes/reports.js'; // Commented out - file doesn't exist yet
+import reportsRoutes from './routes/reports.js';
 import notificationsRoutes, { checkAndNotifyOverdue, createNotification } from './routes/notifications.js';
 
 import pool from './config/database.js';
@@ -91,7 +91,7 @@ app.use('/api/users', usersRoutes);
 app.use('/api/status', statusRoutes);
 app.use('/api/setup', setupRoutes);
 
-// app.use('/api/reports', reportsRoutes); // Commented out - file doesn't exist yet
+app.use('/api/reports', reportsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 
 
@@ -413,6 +413,32 @@ async function startServer(): Promise<void> {
         console.log('\n🔍 Running initial PM check...');
         await checkPMSchedules();
       }, 10000);
+
+      // ── Daily Summary Job: รันทุกวันตอน 00:05 AM ──────────────────────────
+      console.log('📊 Starting daily summary scheduler (every day at 00:05)...');
+      const scheduleDailySummary = () => {
+        const now = new Date();
+        // คำนวณเวลาถึง 00:05 ของวันถัดไป
+        const next = new Date(now);
+        next.setDate(next.getDate() + 1);
+        next.setHours(0, 5, 0, 0);
+        const msUntilNext = next.getTime() - now.getTime();
+        setTimeout(async () => {
+          const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+          console.log(`\n📊 Computing daily summary for ${yesterday}...`);
+          try {
+            const result = await pool.query('SELECT compute_daily_summary($1::DATE) AS upserted', [yesterday]);
+            console.log(`✅ Daily summary done: ${result.rows[0].upserted} sensors for ${yesterday}`);
+          } catch (err) {
+            console.error('❌ Daily summary error:', err);
+          }
+          scheduleDailySummary(); // reschedule for next day
+        }, msUntilNext);
+        const hh = String(next.getHours()).padStart(2, '0');
+        const mm = String(next.getMinutes()).padStart(2, '0');
+        console.log(`📅 Next daily summary: ${next.toDateString()} ${hh}:${mm}`);
+      };
+      scheduleDailySummary();
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);

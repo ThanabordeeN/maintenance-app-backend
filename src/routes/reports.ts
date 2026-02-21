@@ -456,4 +456,87 @@ router.get('/export', async (req: Request, res: Response) => {
   }
 });
 
+// ===========================================
+// EQUIPMENT DAILY SUMMARY (from ct_sensor_data)
+// ===========================================
+
+// GET /api/reports/daily-summary?sensor_id=&equipment_id=&from=&to=
+router.get('/daily-summary', async (req: Request, res: Response) => {
+  try {
+    const { sensor_id, equipment_id, from, to } = req.query;
+
+    const fromDate = from || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const toDate = to || new Date().toISOString().slice(0, 10);
+
+    const params: any[] = [fromDate, toDate];
+    const filters: string[] = [];
+
+    if (sensor_id) {
+      params.push(sensor_id);
+      filters.push(`eds.sensor_id = $${params.length}`);
+    }
+    if (equipment_id) {
+      params.push(equipment_id);
+      filters.push(`eds.equipment_id = $${params.length}`);
+    }
+
+    const whereExtra = filters.length ? 'AND ' + filters.join(' AND ') : '';
+
+    const result = await pool.query(`
+      SELECT
+        eds.date,
+        eds.sensor_id,
+        eds.equipment_id,
+        s.sensor_code,
+        s.sensor_type,
+        e.equipment_name,
+        e.equipment_code,
+        TO_CHAR(eds.uptime,   'HH24:MI:SS') AS uptime,
+        TO_CHAR(eds.downtime, 'HH24:MI:SS') AS downtime,
+        EXTRACT(EPOCH FROM eds.uptime)   AS uptime_seconds,
+        EXTRACT(EPOCH FROM eds.downtime) AS downtime_seconds,
+        ROUND(eds.avg_current::numeric, 3) AS avg_current,
+        ROUND(eds.max_current::numeric, 3) AS max_current,
+        ROUND(eds.min_current::numeric, 3) AS min_current
+      FROM equipment_daily_summary eds
+      LEFT JOIN sensors   s ON eds.sensor_id   = s.sensor_id
+      LEFT JOIN equipment e ON eds.equipment_id = e.id
+      WHERE eds.date BETWEEN $1 AND $2
+        ${whereExtra}
+      ORDER BY eds.date DESC, eds.sensor_id ASC
+    `, params);
+
+    res.json({
+      period: { from: fromDate, to: toDate },
+      count: result.rows.length,
+      data: result.rows,
+    });
+  } catch (error: any) {
+    console.error('Error fetching daily summary:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/reports/daily-summary/compute  (trigger manual recompute for a date)
+router.post('/daily-summary/compute', async (req: Request, res: Response) => {
+  try {
+    const { date } = req.body;
+    const targetDate = date || new Date(Date.now() - 86400000).toISOString().slice(0, 10); // default: yesterday
+
+    const result = await pool.query(
+      'SELECT compute_daily_summary($1::DATE) AS upserted', [targetDate]
+    );
+
+    res.json({
+      date: targetDate,
+      upserted: result.rows[0].upserted,
+      message: `Computed daily summary for ${targetDate}: ${result.rows[0].upserted} sensors`,
+    });
+  } catch (error: any) {
+    console.error('Error computing daily summary:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
+
