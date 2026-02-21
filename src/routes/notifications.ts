@@ -534,6 +534,43 @@ export async function createNotification(data: {
       data.user_id
     ]);
 
+    // ==== LINE NOTIFY INTEGRATION ====
+    try {
+      // 1. Get user's LINE Notify token
+      const userRes = await pool.query(
+        'SELECT line_notify_token FROM maintenance_users WHERE id = $1',
+        [data.user_id]
+      );
+
+      const lineToken = userRes.rows[0]?.line_notify_token;
+
+      // 2. If token exists, send via LINE Notify API
+      if (lineToken) {
+        // Required module import at the top of file or use dynamic import
+        const axios = require('axios');
+        const qs = require('querystring');
+
+        let notifyMessage = `\n🔔 ${data.title}`;
+        if (data.message) {
+          notifyMessage += `\n📝 ${data.message}`;
+        }
+
+        await axios.post(
+          'https://notify-api.line.me/api/notify',
+          qs.stringify({ message: notifyMessage }),
+          {
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Authorization': `Bearer ${lineToken}`
+            }
+          }
+        );
+      }
+    } catch (lineError: any) {
+      console.error('Error sending LINE Notify:', lineError?.response?.data || lineError.message);
+    }
+    // =================================
+
     return msgId;
   } catch (error) {
     console.error('Error creating notification:', error);

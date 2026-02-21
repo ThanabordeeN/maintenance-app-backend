@@ -403,7 +403,7 @@ app.get('/api/pm-status', async (req: Request, res: Response) => {
             status = 'approaching';
           } else if (remainingHours <= 24) {
             status = 'approaching'; // Fallback
-          } else if (remainingHours <= 100 && status !== 'approaching') {
+          } else if (remainingHours <= 100 && (status as string) !== 'approaching') {
             status = 'warning'; // Fallback
           }
         }
