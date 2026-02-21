@@ -9,7 +9,7 @@ import usersRoutes from './routes/users.js';
 import statusRoutes from './routes/status.js';
 import usageRoutes from './routes/usage.js';
 import setupRoutes from './routes/setup.js';
-// import reportsRoutes from './routes/reports.js'; // Commented out - file doesn't exist yet
+import reportsRoutes from './routes/reports.js';
 import notificationsRoutes, { checkAndNotifyOverdue, createNotification } from './routes/notifications.js';
 
 import pool from './config/database.js';
@@ -91,7 +91,7 @@ app.use('/api/users', usersRoutes);
 app.use('/api/status', statusRoutes);
 app.use('/api/setup', setupRoutes);
 
-// app.use('/api/reports', reportsRoutes); // Commented out - file doesn't exist yet
+app.use('/api/reports', reportsRoutes);
 app.use('/api/notifications', notificationsRoutes);
 
 
@@ -121,10 +121,7 @@ async function checkPMSchedules() {
   try {
     console.log('🔍 Checking PM schedules...');
 
-    // Find schedules that are due (remaining <= 0) or approaching (remaining <= threshold)
-    const threshold = 50; // Notify when 50 hours remaining
-
-    const dueSchedules = await pool.query(`
+    const activeSchedules = await pool.query(`
       SELECT 
         ems.id,
         ems.equipment_id,
@@ -140,16 +137,15 @@ async function checkPMSchedules() {
       JOIN equipment e ON ems.equipment_id = e.equipment_id
       WHERE e.is_active = true
         AND ems.current_ticket_id IS NULL
-        AND (ems.last_completed_at_usage + ems.interval_value - e.current_usage) <= $1
-      ORDER BY remaining ASC
-    `, [threshold]);
+    `);
 
-    if (dueSchedules.rows.length === 0) {
-      console.log('✅ No PM schedules due');
+    if (activeSchedules.rows.length === 0) {
+      console.log('✅ No active PM schedules to check');
       return { count: 0, schedules: [], tickets: [] };
     }
 
-    console.log(`⚠️ Found ${dueSchedules.rows.length} PM schedules due/approaching`);
+    const notifiedSchedules = [];
+    const createdTickets = [];
 
     // Get all technicians/admins to notify
     const users = await pool.query(
@@ -162,13 +158,59 @@ async function checkPMSchedules() {
     );
     const assigneeId = defaultAssignee.rows[0]?.id || 1;
 
-    const notifiedSchedules = [];
-    const createdTickets = [];
+    for (const schedule of activeSchedules.rows) {
+      const remainingHours = parseFloat(schedule.remaining);
+      const isOverdue = remainingHours <= 0;
+      let shouldAlert = isOverdue;
+      let statusText = '';
+      let notificationType = 'info';
 
-    for (const schedule of dueSchedules.rows) {
-      const isOverdue = parseFloat(schedule.remaining) <= 0;
-      const statusText = isOverdue ? 'ถึงกำหนดแล้ว' : `อีก ${Math.round(schedule.remaining)} ชม.`;
-      const notificationType = isOverdue ? 'warning' : 'info';
+      // Calculate 7-day average usage for predictive alerts if not overdue
+      if (!isOverdue) {
+        // Also check if physical usage has reached 80% of interval
+        const currentUsagePercentage = (schedule.interval_value - remainingHours) / schedule.interval_value;
+        const reached80Percent = currentUsagePercentage >= 0.8;
+
+        const avgQuery = await pool.query(`
+          SELECT COALESCE(SUM(EXTRACT(EPOCH FROM uptime) / 3600.0) / 7.0, 0) as avg_daily
+          FROM equipment_daily_summary
+          WHERE equipment_id = $1 
+            AND date >= CURRENT_DATE - INTERVAL '7 days'
+        `, [schedule.equipment_id]);
+
+        const avgDailyUsage = parseFloat(avgQuery.rows[0]?.avg_daily || 0);
+        let estimatedDays = Infinity;
+
+        // Condition 1: Predictive 5-day alert
+        if (avgDailyUsage > 0) {
+          estimatedDays = remainingHours / avgDailyUsage;
+          if (estimatedDays <= 5) {
+            shouldAlert = true;
+            statusText = `อีก ~${Math.ceil(estimatedDays)} วัน (${Math.round(remainingHours)} ชม.)`;
+            notificationType = 'warning';
+          }
+        }
+
+        // Condition 2 & 3: Fallbacks
+        if (!shouldAlert) {
+          if (reached80Percent) {
+            // Priority fallback: If machine usage reaches 80% of interval, alert.
+            shouldAlert = true;
+            statusText = `ถึง 80% แล้ว (เหลืออีก ${Math.round(remainingHours)} ชม.)`;
+            notificationType = 'warning';
+          } else if (remainingHours <= 24) {
+            // Critical manual fallback: Less than 24h absolute hours remain.
+            shouldAlert = true;
+            statusText = `อีก ${Math.round(remainingHours)} ชม.`;
+            notificationType = 'warning';
+          }
+        }
+      } else {
+        statusText = 'ถึงกำหนดแล้ว';
+        notificationType = 'warning';
+      }
+
+      if (!shouldAlert) continue;
 
       // Check if notification already sent today for this schedule
       const existingNotif = await pool.query(`
@@ -181,7 +223,6 @@ async function checkPMSchedules() {
 
       // Skip if already notified today (unless it's overdue and we haven't created ticket yet)
       if (existingNotif.rows.length > 0 && !isOverdue) {
-        console.log(`⏭️ Already notified for schedule ${schedule.id} today, skipping`);
         continue;
       }
 
@@ -191,7 +232,6 @@ async function checkPMSchedules() {
 
       if (isOverdue) {
         try {
-          // Generate work order number
           const year = new Date().getFullYear();
           const countResult = await pool.query(`
             SELECT COUNT(*) FROM maintenance_records 
@@ -200,7 +240,6 @@ async function checkPMSchedules() {
           const count = parseInt(countResult.rows[0].count) + 1;
           workOrder = `PM-${year}-${String(count).padStart(6, '0')}`;
 
-          // Create maintenance record
           const ticketResult = await pool.query(`
             INSERT INTO maintenance_records 
             (work_order, equipment_id, created_by, assigned_to, maintenance_type, priority, status, category, title, description, scheduled_date, created_at, updated_at)
@@ -209,7 +248,7 @@ async function checkPMSchedules() {
           `, [
             workOrder,
             schedule.equipment_id,
-            assigneeId, // System created
+            assigneeId,
             assigneeId,
             'preventive',
             'medium',
@@ -221,13 +260,11 @@ async function checkPMSchedules() {
 
           ticketId = ticketResult.rows[0].id;
 
-          // Update schedule with current_ticket_id
           await pool.query(
             'UPDATE equipment_maintenance_schedules SET current_ticket_id = $1, updated_at = NOW() WHERE id = $2',
             [ticketId, schedule.id]
           );
 
-          // Add timeline entry
           await pool.query(
             `INSERT INTO maintenance_timeline (maintenance_id, status, changed_by, notes)
              VALUES ($1, $2, $3, $4)`,
@@ -275,6 +312,7 @@ async function checkPMSchedules() {
         id: schedule.id,
         equipment: schedule.equipment_name,
         remaining: schedule.remaining,
+        statusText,
         isOverdue,
         ticketCreated: !!ticketId,
         workOrder,
@@ -282,7 +320,8 @@ async function checkPMSchedules() {
     }
 
     console.log(`📧 Sent notifications for ${notifiedSchedules.length} PM schedules`);
-    console.log(`🎫 Created ${createdTickets.length} PM tickets`);
+    if (createdTickets.length > 0) console.log(`🎫 Created ${createdTickets.length} PM tickets`);
+
     return { count: notifiedSchedules.length, schedules: notifiedSchedules, tickets: createdTickets };
 
   } catch (error) {
@@ -311,8 +350,6 @@ app.get('/api/debug-schema', async (req: Request, res: Response) => {
 // API endpoint to get PM schedules status (without creating notifications)
 app.get('/api/pm-status', async (req: Request, res: Response) => {
   try {
-    const threshold = 100; // Show schedules within 100 hours
-
     const schedules = await pool.query(`
       SELECT 
         ems.id,
@@ -326,13 +363,53 @@ app.get('/api/pm-status', async (req: Request, res: Response) => {
         (ems.last_completed_at_usage + ems.interval_value) as next_due,
         (ems.last_completed_at_usage + ems.interval_value - e.current_usage) as remaining
       FROM equipment_maintenance_schedules ems
-      JOIN equipment e ON ems.equipment_id = e.id
+      JOIN equipment e ON ems.equipment_id = e.equipment_id
       WHERE e.is_active = true
       ORDER BY remaining ASC
     `);
 
-    res.json({
-      schedules: schedules.rows.map(s => ({
+    // Fetch 7-day average for all equipment returned
+    const statusResults = [];
+    for (const s of schedules.rows) {
+      const remainingHours = parseFloat(s.remaining);
+      const currentUsagePercentage = (s.interval_value - remainingHours) / s.interval_value;
+      const reached80Percent = currentUsagePercentage >= 0.8;
+
+      let estimatedDays = Infinity;
+      let status: string = 'ok';
+
+      if (remainingHours <= 0) {
+        status = 'overdue';
+        estimatedDays = 0;
+      } else {
+        const avgQuery = await pool.query(`
+          SELECT COALESCE(SUM(EXTRACT(EPOCH FROM uptime) / 3600.0) / 7.0, 0) as avg_daily
+          FROM equipment_daily_summary
+          WHERE equipment_id = $1 
+            AND date >= CURRENT_DATE - INTERVAL '7 days'
+        `, [s.equipment_id]);
+
+        const avgDailyUsage = parseFloat(avgQuery.rows[0]?.avg_daily || 0);
+
+        if (avgDailyUsage > 0) {
+          estimatedDays = remainingHours / avgDailyUsage;
+          if (estimatedDays <= 5) status = 'approaching';
+          else if (estimatedDays <= 14) status = 'warning'; // Warning tier for UI
+        }
+
+        // Fallbacks if predictive doesn't trigger 'approaching'
+        if (status === 'ok' || status === 'warning') {
+          if (reached80Percent) {
+            status = 'approaching';
+          } else if (remainingHours <= 24) {
+            status = 'approaching'; // Fallback
+          } else if (remainingHours <= 100 && (status as string) !== 'approaching') {
+            status = 'warning'; // Fallback
+          }
+        }
+      }
+
+      statusResults.push({
         id: s.id,
         equipment: s.equipment_name,
         equipment_code: s.equipment_code,
@@ -340,15 +417,15 @@ app.get('/api/pm-status', async (req: Request, res: Response) => {
         interval: s.interval_value,
         currentUsage: s.current_usage,
         nextDue: s.next_due,
-        remaining: parseFloat(s.remaining),
+        remaining: remainingHours,
+        estimatedDays: estimatedDays === Infinity ? null : estimatedDays,
         hasTicket: !!s.current_ticket_id,
         ticketId: s.current_ticket_id,
-        status: parseFloat(s.remaining) <= 0 ? 'overdue'
-          : parseFloat(s.remaining) <= 50 ? 'warning'
-            : parseFloat(s.remaining) <= threshold ? 'approaching'
-              : 'ok'
-      }))
-    });
+        status
+      });
+    }
+
+    res.json({ schedules: statusResults });
   } catch (error) {
     console.error('Error getting PM status:', error);
     res.status(500).json({ error: String(error) });
@@ -413,6 +490,32 @@ async function startServer(): Promise<void> {
         console.log('\n🔍 Running initial PM check...');
         await checkPMSchedules();
       }, 10000);
+
+      // ── Daily Summary Job: รันทุกวันตอน 00:05 AM ──────────────────────────
+      console.log('📊 Starting daily summary scheduler (every day at 00:05)...');
+      const scheduleDailySummary = () => {
+        const now = new Date();
+        // คำนวณเวลาถึง 00:05 ของวันถัดไป
+        const next = new Date(now);
+        next.setDate(next.getDate() + 1);
+        next.setHours(0, 5, 0, 0);
+        const msUntilNext = next.getTime() - now.getTime();
+        setTimeout(async () => {
+          const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+          console.log(`\n📊 Computing daily summary for ${yesterday}...`);
+          try {
+            const result = await pool.query('SELECT compute_daily_summary($1::DATE) AS upserted', [yesterday]);
+            console.log(`✅ Daily summary done: ${result.rows[0].upserted} sensors for ${yesterday}`);
+          } catch (err) {
+            console.error('❌ Daily summary error:', err);
+          }
+          scheduleDailySummary(); // reschedule for next day
+        }, msUntilNext);
+        const hh = String(next.getHours()).padStart(2, '0');
+        const mm = String(next.getMinutes()).padStart(2, '0');
+        console.log(`📅 Next daily summary: ${next.toDateString()} ${hh}:${mm}`);
+      };
+      scheduleDailySummary();
     });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
