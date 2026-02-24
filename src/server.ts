@@ -493,15 +493,57 @@ async function startServer(): Promise<void> {
 
       // ── Daily Summary Job: รันทุกวันตอน 00:05 AM ──────────────────────────
       console.log('📊 Starting daily summary scheduler (every day at 00:05)...');
+
+      const runCatchupDailySummary = async () => {
+        try {
+          console.log('\n🔍 Check and run missing daily summaries...');
+          // ดึงวันที่ที่มีใน ct_sensor_data แต่ไม่มีใน equipment_daily_summary (ย้อนหลัง 14 วัน)
+          const { rows } = await pool.query(`
+            WITH sensor_days AS (
+              SELECT DISTINCT DATE(time AT TIME ZONE 'Asia/Bangkok') as date
+              FROM ct_sensor_data
+              WHERE time >= NOW() - INTERVAL '14 days' 
+                AND DATE(time AT TIME ZONE 'Asia/Bangkok') < DATE(NOW() AT TIME ZONE 'Asia/Bangkok')
+            )
+            SELECT s.date
+            FROM sensor_days s
+            LEFT JOIN equipment_daily_summary e ON s.date = e.date
+            WHERE e.date IS NULL
+            ORDER BY s.date ASC;
+          `);
+
+          for (const row of rows) {
+            // Because row.date creates a Date object at UTC 00:00:00 equivalent to the local day but technically represented as UTC, it's safer to use format
+            const dateObj = new Date(row.date);
+            const dateStr = dateObj.toLocaleDateString('en-CA').slice(0, 10);
+            console.log(`📊 [Catch-up] Computing daily summary for ${dateStr}...`);
+            const result = await pool.query('SELECT compute_daily_summary($1::DATE) AS upserted', [dateStr]);
+            console.log(`✅ [Catch-up] Daily summary done: ${result.rows[0].upserted} sensors for ${dateStr}`);
+          }
+        } catch (err) {
+          console.error('❌ Catch-up daily summary error:', err);
+        }
+      };
+
+      // รัน Catch-up ทันทีเมื่อเปิด server เพื่ออุดช่องโหว่กรณี Server ดับ/Restart ระหว่างวันแล้ว Scheduled timer พลาด
+      setTimeout(runCatchupDailySummary, 15000);
+
       const scheduleDailySummary = () => {
         const now = new Date();
-        // คำนวณเวลาถึง 00:05 ของวันถัดไป
         const next = new Date(now);
-        next.setDate(next.getDate() + 1);
         next.setHours(0, 5, 0, 0);
+
+        // If current time is past 00:05 today, schedule for 00:05 tomorrow.
+        // Otherwise, schedule for 00:05 today.
+        if (now.getTime() >= next.getTime()) {
+          next.setDate(next.getDate() + 1);
+        }
+
         const msUntilNext = next.getTime() - now.getTime();
         setTimeout(async () => {
-          const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+          // แก้บัค Timezone: หากใช้ toISOString() ตรงๆ เวลาตี 00:05 จะถูกแปลงเป็นเวลา UTC (17:05 ของวันก่อนหน้า)
+          // ทำให้เวลา slice(0, 10) วันที่จะผิดไป 1 วันตลอดการทำงาน
+          const yesterday = new Date(Date.now() - 86400000).toLocaleString('en-CA', { timeZone: 'Asia/Bangkok' }).slice(0, 10);
           console.log(`\n📊 Computing daily summary for ${yesterday}...`);
           try {
             const result = await pool.query('SELECT compute_daily_summary($1::DATE) AS upserted', [yesterday]);
