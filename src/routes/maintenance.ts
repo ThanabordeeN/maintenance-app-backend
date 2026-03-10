@@ -398,6 +398,7 @@ router.get('/records', async (req: Request, res: Response) => {
     let query = `
       SELECT mr.*, 
              u.display_name as created_by_name,
+             u.role as created_by_role,
              a.display_name as assigned_to_name,
              e.equipment_name, e.equipment_code, e.location
       FROM maintenance_records mr
@@ -435,6 +436,13 @@ router.get('/records', async (req: Request, res: Response) => {
 
     // Format response to match main dashboard expected format
     const records = result.rows.map((r: any) => ({
+      sourceLabel: r.created_by
+        ? (r.created_by_role === 'admin'
+            ? 'Admin'
+            : r.created_by_role === 'supervisor'
+              ? 'Supervisor'
+              : 'Technician')
+        : 'System',
       id: String(r.id),
       workOrder: r.work_order,
       work_order: r.work_order,
@@ -443,7 +451,13 @@ router.get('/records', async (req: Request, res: Response) => {
       created_at: r.created_at,
       date: r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : '',
       time: r.created_at ? new Date(r.created_at).toTimeString().substring(0, 5) : '',
-      source: r.created_by ? 'Technician' : 'System',
+      source: r.created_by
+        ? (r.created_by_role === 'admin'
+            ? 'Admin'
+            : r.created_by_role === 'supervisor'
+              ? 'Supervisor'
+              : 'Technician')
+        : 'System',
       machine: r.equipment_name || r.equipment_code || 'Unknown',
       message: r.maintenance_type,
       status: r.status,
