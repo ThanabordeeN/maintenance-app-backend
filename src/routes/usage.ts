@@ -64,9 +64,11 @@ router.post('/equipment/:id/usage-logs', upload.single('image'), async (req: Req
       [id, usage_value, notes || null, condition || 'normal', imageUrl, recorded_by || null]
     );
 
-    // 2. Update current_usage in equipment table
+    // 2. Update current_usage in equipment table.
+    // Also reset usage_last_synced_at = NOW() so the auto-sync cron continues
+    // accumulating from this new manual baseline instead of double-counting.
     await client.query(
-      'UPDATE equipment SET current_usage = $1, updated_at = NOW() WHERE equipment_id = $2',
+      'UPDATE equipment SET current_usage = $1, usage_last_synced_at = NOW(), updated_at = NOW() WHERE equipment_id = $2',
       [usage_value, id]
     );
 
