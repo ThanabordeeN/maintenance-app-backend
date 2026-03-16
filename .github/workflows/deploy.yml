@@ -1,0 +1,53 @@
+name: Deploy to Production
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+jobs:
+  check_merge_from_dev:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Check if PR is merged from dev
+        id: check
+        run: |
+          if [[ "${{ github.event.pull_request.merged }}" == "true" && \
+                "${{ github.event.pull_request.head.ref }}" == "dev" ]]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [check_merge_from_dev]
+    if: needs.check_merge_from_dev.outputs.should_run == 'true'
+    steps:
+      - name: Install Cloudflared
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: Setup SSH Key and Config
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          cat <<EOF > ~/.ssh/config
+          Host srung-ssh.2edge.co
+            User ${{ secrets.VPS_USERNAME }}
+            ProxyCommand cloudflared access ssh --hostname %h
+            StrictHostKeyChecking no
+            IdentityFile ~/.ssh/id_ed25519
+          EOF
+
+      - name: Deploy to VPS via Cloudflare Tunnel
+        run: |
+          ssh srung-ssh.2edge.co \
+            "flock -x /tmp/qsmart-deploy.lock \
+             bash /root/servers/QSMART-SERVER/scripts/deploy.sh"
