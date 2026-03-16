@@ -31,4 +31,4 @@ jobs:
       - name: Deploy to Production
         run: |
           flock -x /tmp/qsmart-deploy.lock \
-            sudo bash /root/servers/QSMART-SERVER/scripts/deploy.sh
+            sudo /usr/bin/bash /root/servers/QSMART-SERVER/scripts/deploy.sh
