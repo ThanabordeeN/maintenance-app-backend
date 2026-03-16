@@ -24,33 +24,11 @@ jobs:
           fi
 
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, vps-deploy]
     needs: [check_merge_from_dev]
     if: needs.check_merge_from_dev.outputs.should_run == 'true'
     steps:
-      - name: Install Cloudflared
+      - name: Deploy to Production
         run: |
-          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared-linux-amd64.deb
-
-      - name: Setup SSH Key and Config
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          cat <<EOF > ~/.ssh/config
-          Host srung-ssh.2edge.co
-            User ${{ secrets.VPS_USERNAME }}
-            ProxyCommand cloudflared access ssh --hostname %h
-            StrictHostKeyChecking no
-            IdentityFile ~/.ssh/id_ed25519
-          EOF
-
-      - name: Deploy to VPS via Cloudflare Tunnel
-        env:
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-        run: |
-          ssh srung-ssh.2edge.co \
-            "flock -x /tmp/qsmart-deploy.lock \
-             bash /root/servers/QSMART-SERVER/scripts/deploy.sh"
+          flock -x /tmp/qsmart-deploy.lock \
+            bash /root/servers/QSMART-SERVER/scripts/deploy.sh
