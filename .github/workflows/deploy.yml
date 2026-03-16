@@ -47,6 +47,9 @@ jobs:
           EOF
 
       - name: Deploy to VPS via Cloudflare Tunnel
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           ssh srung-ssh.2edge.co \
             "flock -x /tmp/qsmart-deploy.lock \
