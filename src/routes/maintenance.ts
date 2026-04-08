@@ -180,7 +180,7 @@ router.put('/equipment/:id', async (req: Request, res: Response) => {
       await client.query('BEGIN');
 
       const result = await client.query(
-        `UPDATE equipment 
+        `UPDATE equipment
          SET equipment_code = COALESCE($1, equipment_code),
              equipment_type = COALESCE($2, equipment_type),
              equipment_name = COALESCE($3, equipment_name),
