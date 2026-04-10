@@ -149,7 +149,7 @@ async function checkPMSchedules() {
 
     // Get all technicians/admins to notify
     const users = await pool.query(
-      "SELECT id, display_name, line_notify_token FROM maintenance_users WHERE role IN ('admin', 'supervisor', 'technician')"
+      "SELECT id, display_name FROM maintenance_users WHERE role IN ('admin', 'supervisor', 'technician')"
     );
 
     // Get first admin/supervisor for auto-assignment
