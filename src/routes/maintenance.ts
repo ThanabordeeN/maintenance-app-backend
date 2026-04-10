@@ -966,4 +966,80 @@ router.post('/records/:id/update', upload.array('images', 5), async (req: Reques
   }
 });
 
+// ────────────────────────────────────────────────────────────────────────────
+// Sync fleet vehicles from the GPS database into the equipment table
+// Both apps share the same PostgreSQL instance so we can query vehicles directly
+// ────────────────────────────────────────────────────────────────────────────
+router.post('/sync-fleet-vehicles', async (req: Request, res: Response) => {
+  try {
+    // Idempotent migration: add source column if not present
+    await pool.query(`
+      ALTER TABLE equipment
+      ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT NULL
+    `);
+
+    // Fetch all active vehicles from the shared GPS database
+    const vehiclesResult = await pool.query<{
+      vehicle_code: string;
+      vehicle_type: string | null;
+      license_plate: string | null;
+      friendly_name: string | null;
+      is_active: boolean;
+    }>(`
+      SELECT vehicle_code, vehicle_type, license_plate,
+             COALESCE(friendly_name, vehicle_code) AS friendly_name,
+             is_active
+      FROM vehicles
+      WHERE is_active = true
+      ORDER BY vehicle_code
+    `);
+
+    let synced = 0;
+    let skipped = 0;
+
+    for (const v of vehiclesResult.rows) {
+      // Map GPS vehicle_type → maintenance equipment_type
+      const rawType = (v.vehicle_type || 'MINING_TRUCK').toUpperCase();
+      const equipmentType =
+        rawType === 'MINING_TRUCK' ? 'mining_truck' :
+        rawType === 'WHEEL_LOADER' ? 'wheel_loader' :
+        rawType === 'EXCAVATOR' ? 'excavator' :
+        rawType === 'DUMP_TRUCK' ? 'dump_truck' :
+        'mining_truck';
+
+      const equipmentName = v.friendly_name || v.vehicle_code;
+      const description = v.license_plate
+        ? `GPS Fleet System — ทะเบียน ${v.license_plate}`
+        : 'GPS Fleet System';
+
+      // Upsert: insert new, update name/type only for existing system entries
+      await pool.query(`
+        INSERT INTO equipment (
+          equipment_code, equipment_type, equipment_name, description,
+          maintenance_unit, initial_usage, current_usage,
+          is_active, source, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, 'kilometers', 0, 0, true, 'system', NOW(), NOW())
+        ON CONFLICT (equipment_code) DO UPDATE SET
+          equipment_name = CASE WHEN equipment.source = 'system' THEN EXCLUDED.equipment_name ELSE equipment.equipment_name END,
+          equipment_type = CASE WHEN equipment.source = 'system' THEN EXCLUDED.equipment_type ELSE equipment.equipment_type END,
+          description   = CASE WHEN equipment.source = 'system' THEN EXCLUDED.description    ELSE equipment.description    END,
+          is_active     = CASE WHEN equipment.source = 'system' THEN true                    ELSE equipment.is_active      END,
+          updated_at    = NOW()
+      `, [v.vehicle_code, equipmentType, equipmentName, description]);
+
+      synced++;
+    }
+
+    res.json({
+      success: true,
+      synced,
+      skipped,
+      total: vehiclesResult.rows.length,
+    });
+  } catch (error: any) {
+    console.error('Sync fleet vehicles error:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
 export default router;
