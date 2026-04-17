@@ -1,6 +1,7 @@
 import express, { Request, Response, Router } from 'express';
 // mapStatus helper removed as we pass raw status
 import pool from '../config/database.js';
+import { createNotification } from './notifications.js';
 
 const router: Router = express.Router();
 
@@ -179,7 +180,7 @@ router.put('/equipment/:id', async (req: Request, res: Response) => {
       await client.query('BEGIN');
 
       const result = await client.query(
-        `UPDATE equipment 
+        `UPDATE equipment
          SET equipment_code = COALESCE($1, equipment_code),
              equipment_type = COALESCE($2, equipment_type),
              equipment_name = COALESCE($3, equipment_name),
@@ -396,11 +397,12 @@ router.get('/records', async (req: Request, res: Response) => {
     const { status, priority, category } = req.query;
 
     let query = `
-      SELECT mr.*, 
+      SELECT mr.*,
              u.display_name as created_by_name,
              u.role as created_by_role,
              a.display_name as assigned_to_name,
-             e.equipment_name, e.equipment_code, e.location
+             e.equipment_name, e.equipment_code, e.location,
+             (SELECT COUNT(*) FROM maintenance_images mi WHERE mi.maintenance_id = mr.id) AS media_count
       FROM maintenance_records mr
       LEFT JOIN maintenance_users u ON mr.created_by = u.id
       LEFT JOIN maintenance_users a ON mr.assigned_to = a.id
@@ -468,6 +470,7 @@ router.get('/records', async (req: Request, res: Response) => {
       title: r.title || '',
       description: r.description || '',
       notes: r.notes || '',
+      media_count: parseInt(r.media_count) || 0,
     }));
 
     res.json(records);
@@ -625,7 +628,7 @@ router.post('/records', upload.array('images', 5), async (req: Request, res: Res
        (work_order, equipment_id, created_by, assigned_to, maintenance_type, priority, status, category, title, description, notes, scheduled_date, schedule_id, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
        RETURNING *`,
-      [workOrder, equipmentId || null, userId || null, assignedTo || userId || null, maintenanceType, priority, status, category, title || null, description || null, notes || null, scheduledDate || null, scheduleId || null]
+      [workOrder, equipmentId || null, userId || null, assignedTo || null, maintenanceType, priority, status, category, title || null, description || null, notes || null, scheduledDate || null, scheduleId || null]
     );
 
     const record = recordResult.rows[0];
@@ -691,6 +694,7 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
       status,
       notes,
       userId,
+      assignedTo,
       rootCause,
       actionTaken,
       cancelledReason,
@@ -711,7 +715,12 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
       const { started_at, downtime_minutes, schedule_id, equipment_id } = currentRecord.rows[0];
 
       if (dbStatus === 'in_progress') {
-        // Start or Resume
+        // Start or Resume — assign to the user starting the job (only if not yet assigned)
+        const assignCheck = await client.query('SELECT assigned_to FROM maintenance_records WHERE id = $1', [id]);
+        if (!assignCheck.rows[0]?.assigned_to && userId) {
+          updates.push(`assigned_to = $${paramCount++}`);
+          values.push(userId);
+        }
         updates.push(`started_at = CURRENT_TIMESTAMP`);
       } else if (dbStatus === 'on_hold' || dbStatus === 'completed' || dbStatus === 'cancelled') {
         // Pause or Finish - calculate and add segment downtime
@@ -770,6 +779,15 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
       values.push(onHoldReason);
     }
 
+    // Explicit assignment (admin/supervisor reassign)
+    let prevAssignedTo: number | null = null;
+    if (assignedTo !== undefined) {
+      const prev = await client.query('SELECT assigned_to, work_order FROM maintenance_records WHERE id = $1', [id]);
+      prevAssignedTo = prev.rows[0]?.assigned_to ?? null;
+      updates.push(`assigned_to = $${paramCount++}`);
+      values.push(assignedTo);
+    }
+
     updates.push(`updated_at = CURRENT_TIMESTAMP`);
     values.push(parseInt(id));
 
@@ -815,6 +833,27 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
     }
 
     await client.query('COMMIT');
+
+    // Send notification to newly assigned user (after commit, non-blocking)
+    const newAssignedTo = assignedTo ?? result.rows[0]?.assigned_to;
+    if (assignedTo !== undefined && newAssignedTo && newAssignedTo !== prevAssignedTo) {
+      const workOrder = result.rows[0]?.work_order;
+      const equipmentRes = await pool.query(
+        `SELECT e.equipment_name FROM maintenance_records mr
+         LEFT JOIN equipment e ON e.equipment_id = mr.equipment_id
+         WHERE mr.id = $1`, [id]
+      );
+      const equipmentName = equipmentRes.rows[0]?.equipment_name || workOrder;
+      createNotification({
+        user_id: newAssignedTo,
+        title: 'ได้รับมอบหมายงานซ่อม',
+        message: `คุณได้รับมอบหมายงาน ${workOrder} — ${equipmentName}`,
+        type: 'info',
+        category: 'maintenance',
+        reference_type: 'maintenance_record',
+        reference_id: parseInt(id),
+      }).catch((err: Error) => console.error('Notification error:', err));
+    }
 
     res.json({
       id: String(result.rows[0].id),

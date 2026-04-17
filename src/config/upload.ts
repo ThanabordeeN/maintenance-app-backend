@@ -22,7 +22,7 @@ const storage = multer.diskStorage({
   }
 });
 
-// File filter (only images — includes HEIC/HEIF from iPhone cameras)
+// File filter (images + videos — includes HEIC/HEIF from iPhone cameras, MP4/MOV from phone recordings)
 const ALLOWED_MIME_TYPES = [
   'image/jpeg',
   'image/jpg',
@@ -31,26 +31,36 @@ const ALLOWED_MIME_TYPES = [
   'image/webp',
   'image/heic',
   'image/heif',
+  'video/mp4',
+  'video/quicktime',  // .mov (iPhone)
+  'video/x-msvideo', // .avi
+  'video/webm',
+  'video/3gpp',       // .3gp (Android)
+  'video/x-matroska', // .mkv
+];
+
+const ALLOWED_EXTENSIONS = [
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif',
+  '.mp4', '.mov', '.avi', '.webm', '.3gp', '.mkv',
 ];
 
 const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-  // Some phones send an empty or nonstandard mimetype for HEIC — check extension too
   const ext = path.extname(file.originalname).toLowerCase();
-  const isAllowedMime = file.mimetype.startsWith('image/') || ALLOWED_MIME_TYPES.includes(file.mimetype);
-  const isAllowedExt = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif'].includes(ext);
+  const isAllowedMime = file.mimetype.startsWith('image/') || file.mimetype.startsWith('video/') || ALLOWED_MIME_TYPES.includes(file.mimetype);
+  const isAllowedExt = ALLOWED_EXTENSIONS.includes(ext);
 
   if (isAllowedMime || isAllowedExt) {
     cb(null, true);
   } else {
-    cb(new Error('Only images are allowed!'));
+    cb(new Error('Only images and videos are allowed!'));
   }
 };
 
-const upload = multer({ 
+const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
-    fileSize: 20 * 1024 * 1024 // 20MB limit (phone cameras can produce large files)
+    fileSize: 100 * 1024 * 1024 // 100MB limit (videos can be large)
   }
 });
 
