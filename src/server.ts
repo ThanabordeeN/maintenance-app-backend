@@ -11,6 +11,7 @@ import usageRoutes from './routes/usage.js';
 import setupRoutes from './routes/setup.js';
 import reportsRoutes from './routes/reports.js';
 import notificationsRoutes, { checkAndNotifyOverdue, createNotification } from './routes/notifications.js';
+import { sendPushToRoles } from './services/push.service.js';
 
 import pool from './config/database.js';
 
@@ -307,6 +308,16 @@ async function checkPMSchedules() {
           reference_id: ticketId || schedule.id,
         });
       }
+
+      // Push notification ไปทุก role (ทำหลัง in-app, non-blocking)
+      sendPushToRoles(['admin', 'supervisor', 'technician'], {
+        title: isOverdue
+          ? `PM ถึงกำหนด: ${schedule.equipment_name}`
+          : `PM ใกล้ถึง: ${schedule.equipment_name}`,
+        body: schedule.description || `ทุก ${schedule.interval_value} ชม.${statusText ? ` — ${statusText}` : ''}`,
+        url: '/maintenance',
+        tag: `pm-${schedule.id}`,
+      }).catch(() => {});
 
       notifiedSchedules.push({
         id: schedule.id,
