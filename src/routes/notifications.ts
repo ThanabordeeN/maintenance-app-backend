@@ -1,7 +1,58 @@
 import express, { Request, Response, Router } from 'express';
+import webpush from 'web-push';
 import pool from '../config/database.js';
 
 const router: Router = express.Router();
+
+// ===========================================
+// WEB PUSH (VAPID)
+// ===========================================
+
+router.get('/push/vapid-public-key', (_req: Request, res: Response) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY ?? null });
+});
+
+router.post('/push/subscribe', async (req: Request, res: Response) => {
+  try {
+    const { userId, subscription } = req.body as {
+      userId: number;
+      subscription: { endpoint: string; keys: { p256dh: string; auth: string } };
+    };
+
+    if (!userId || !subscription?.endpoint) {
+      return res.status(400).json({ error: 'userId and subscription are required' });
+    }
+
+    // sanitizeInputs middleware HTML-encodes slashes — decode back for URL fields
+    const decodeHtml = (s: string) => s.replace(/&#x2F;/g, '/').replace(/&amp;/g, '&');
+    const endpoint = decodeHtml(subscription.endpoint);
+    const p256dh = subscription.keys.p256dh;
+    const auth = subscription.keys.auth;
+
+    await pool.query(
+      `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (endpoint) DO UPDATE SET user_id = $1, p256dh = $3, auth = $4, user_agent = $5`,
+      [userId, endpoint, p256dh, auth, req.headers['user-agent'] ?? null]
+    );
+
+    res.status(201).json({ ok: true });
+  } catch (error: any) {
+    console.error('Error saving push subscription:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.delete('/push/subscribe', async (req: Request, res: Response) => {
+  try {
+    const { endpoint } = req.body as { endpoint: string };
+    if (!endpoint) return res.status(400).json({ error: 'endpoint is required' });
+    await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [endpoint]);
+    res.json({ ok: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ===========================================
 // NOTIFICATIONS

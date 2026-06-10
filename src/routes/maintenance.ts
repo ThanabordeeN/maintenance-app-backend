@@ -2,6 +2,7 @@ import express, { Request, Response, Router } from 'express';
 // mapStatus helper removed as we pass raw status
 import pool from '../config/database.js';
 import { createNotification } from './notifications.js';
+import { sendPushToRoles, sendPushToUser } from '../services/push.service.js';
 
 const router: Router = express.Router();
 
@@ -663,6 +664,31 @@ router.post('/records', upload.array('images', 5), async (req: Request, res: Res
 
     await client.query('COMMIT');
 
+    // In-app + Push: แจ้ง admin/supervisor ว่ามี work order ใหม่ (non-blocking)
+    const notifyAdmins = async () => {
+      const admins = await pool.query(
+        `SELECT id FROM maintenance_users WHERE role IN ('admin','supervisor')`
+      );
+      for (const u of admins.rows) {
+        createNotification({
+          user_id: u.id,
+          title: 'Work Order ใหม่',
+          message: `${workOrder} — ${title || 'ไม่มีหัวข้อ'}`,
+          type: 'info',
+          category: 'maintenance',
+          reference_type: 'maintenance_record',
+          reference_id: record.id,
+        }).catch(() => {});
+      }
+      sendPushToRoles(['admin', 'supervisor'], {
+        title: 'Work Order ใหม่',
+        body: `${workOrder} — ${title || 'ไม่มีหัวข้อ'}`,
+        url: `/maintenance/?record=${record.id}`,
+        tag: `wo-new-${record.id}`,
+      }).catch(() => {});
+    };
+    notifyAdmins().catch(() => {});
+
     res.status(201).json({
       id: String(record.id),
       workOrder: record.work_order,
@@ -834,16 +860,20 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
 
     await client.query('COMMIT');
 
-    // Send notification to newly assigned user (after commit, non-blocking)
+    // Notifications after commit (non-blocking)
+    const workOrder = result.rows[0]?.work_order;
+    const createdBy: number | null = result.rows[0]?.created_by ?? null;
+
+    const equipmentRes = await pool.query(
+      `SELECT e.equipment_name FROM maintenance_records mr
+       LEFT JOIN equipment e ON e.equipment_id = mr.equipment_id
+       WHERE mr.id = $1`, [id]
+    );
+    const equipmentName = equipmentRes.rows[0]?.equipment_name || workOrder;
+
+    // Assign notification
     const newAssignedTo = assignedTo ?? result.rows[0]?.assigned_to;
     if (assignedTo !== undefined && newAssignedTo && newAssignedTo !== prevAssignedTo) {
-      const workOrder = result.rows[0]?.work_order;
-      const equipmentRes = await pool.query(
-        `SELECT e.equipment_name FROM maintenance_records mr
-         LEFT JOIN equipment e ON e.equipment_id = mr.equipment_id
-         WHERE mr.id = $1`, [id]
-      );
-      const equipmentName = equipmentRes.rows[0]?.equipment_name || workOrder;
       createNotification({
         user_id: newAssignedTo,
         title: 'ได้รับมอบหมายงานซ่อม',
@@ -853,6 +883,41 @@ router.patch('/records/:id', upload.array('images', 5), async (req: Request, res
         reference_type: 'maintenance_record',
         reference_id: parseInt(id),
       }).catch((err: Error) => console.error('Notification error:', err));
+
+      sendPushToUser(newAssignedTo, {
+        title: 'มอบหมายงานใหม่',
+        body: `${workOrder} — ${equipmentName}`,
+        url: `/maintenance/?record=${id}`,
+        tag: `assign-${id}`,
+      }).catch(() => {});
+    }
+
+    // In-app + Push: status change → notify ผู้สร้าง record
+    if (status && createdBy) {
+      const statusLabels: Record<string, string> = {
+        in_progress: 'กำลังดำเนินการ',
+        completed: 'เสร็จสิ้น',
+        cancelled: 'ยกเลิก',
+      };
+      const label = statusLabels[reverseMapStatus(status)];
+      if (label) {
+        createNotification({
+          user_id: createdBy,
+          title: `${workOrder} — ${label}`,
+          message: equipmentName,
+          type: reverseMapStatus(status) === 'completed' ? 'success' : 'info',
+          category: 'maintenance',
+          reference_type: 'maintenance_record',
+          reference_id: parseInt(id),
+        }).catch(() => {});
+
+        sendPushToUser(createdBy, {
+          title: `${workOrder} — ${label}`,
+          body: equipmentName,
+          url: `/maintenance/?record=${id}`,
+          tag: `status-${id}`,
+        }).catch(() => {});
+      }
     }
 
     res.json({
